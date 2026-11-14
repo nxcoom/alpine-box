@@ -97,7 +97,18 @@ jobs:
             sleep 3
           done
           echo "key.db user: ${U:-none}"
-          [ "$CREDS_OK" = "true" ] || { echo EASYNODE_CREDS_FAIL; exit 1; }
+          if [ "$CREDS_OK" != "true" ]; then
+            echo "=== easynode-orchestrator.log:"
+            docker exec alpine-box-test sh -c 'cat /var/log/easynode-orchestrator.log 2>/dev/null || echo "(不存在)"'
+            echo "=== easynode.log 尾部:"
+            docker exec alpine-box-test sh -c 'tail -20 /var/log/easynode.log 2>/dev/null'
+            echo "=== 进程:"
+            docker exec alpine-box-test sh -c 'ps aux | grep -v grep | grep -E "node|sh " | head -8'
+            echo "=== 端口:"
+            docker exec alpine-box-test sh -c 'netstat -tln 2>/dev/null | head -12'
+            echo EASYNODE_CREDS_FAIL
+            exit 1
+          fi
           echo EASYNODE_PANEL_OK
 
       - name: 容器日志
