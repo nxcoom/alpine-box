@@ -21,6 +21,7 @@ SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-$DEFAULT_SSH_PUBLIC_KEY}"
 SHOW_LOG="${SHOW_LOG:-true}"
 CF_TOKEN="${CF_TOKEN:-}"
 FILE_PATH="${FILE_PATH:-/var/lib/alpine-box}"
+PORT="${PORT:-3000}"   # 状态页端口 (deployzy 平台默认探测 3000)
 
 GREEN='\033[0;32m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { printf '%b\n' "${GREEN}[alpine-box]${NC} $*"; }
@@ -141,6 +142,27 @@ fi
 
 # ---------- 3. 系统日志 (busybox syslogd, guan 菜单可查看) ----------
 syslogd -O /var/log/messages -s 1024 2>/dev/null || true
+
+# ---------- 3.5 状态页 (平台 HTTP 路由可见的服务状态, 便于远程检查) ----------
+STATUS_DIR=/var/www/status
+mkdir -p "$STATUS_DIR"
+write_status() {
+  {
+    echo "alpine-box status @ $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "sshd : $(pgrep -f 'sshd.*[l]istener' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
+    echo "tunc : $(pgrep -x tunc >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
+    echo "tunnel-token: $([ -s /etc/tunc/token ] && echo SET || echo NONE)"
+    echo
+    echo "== tunc.log (tail 20) =="
+    tail -n 20 /var/log/tunc.log 2>/dev/null
+    echo
+    echo "== messages (tail 10) =="
+    tail -n 10 /var/log/messages 2>/dev/null
+  } > "$STATUS_DIR/index.html" 2>/dev/null
+}
+( while :; do write_status; sleep 10; done ) &
+httpd -f -p "$PORT" -h "$STATUS_DIR" 2>/dev/null &
+log "状态页已启动: 端口 $PORT (/var/www/status)"
 
 # ---------- 4. 看门狗: 每 30s 检查, 服务被杀后自动拉起 ----------
 (

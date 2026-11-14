@@ -27,6 +27,21 @@ Alpine 系统镜像，集成三个运维工具，可直接部署到 [deployzy](h
 | `CF_TOKEN` | 空 | Cloudflare Tunnel Token，设置后自动启动 tunc |
 | `SHOW_LOG` | `true` | 服务日志是否输出到容器 stdout（供平台日志查看） |
 | `FILE_PATH` | `/var/lib/alpine-box` | 数据目录，SSH 主机密钥持久化在其中 `host-keys/` |
+| `PORT` | `3000` | 状态页监听端口（deployzy 平台默认探测 3000） |
+
+## 状态页
+
+容器内 3000 端口运行一个 busybox httpd（`http://<host>:3000/`），输出当前服务状态与日志尾部，方便通过平台 HTTP 路由远程检查：
+
+```
+alpine-box status @ 2026-11-14T08:00:00Z
+sshd : RUNNING
+tunc : RUNNING
+tunnel-token: SET
+
+== tunc.log (tail 20) ==
+...
+```
 
 ## 部署到 deployzy
 

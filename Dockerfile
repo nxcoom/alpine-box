@@ -38,4 +38,7 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/healthcheck \
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s CMD /usr/local/bin/healthcheck
 
+# 3000: 状态页 (服务状态 + tunc/messages 日志尾部)
+EXPOSE 3000
+
 ENTRYPOINT ["/entrypoint.sh"]
