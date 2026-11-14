@@ -19,11 +19,8 @@ ENV SSH_ENABLED=true \
 
 RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata python3 iputils
 
-# EasyNode: 直接取官方镜像产物 (双架构), 应用在 /opt/easynode
-FROM chaoszhu/easynode:latest AS easynode
-
-FROM node:22-alpine
-COPY --from=easynode /easynode /opt/easynode
+# EasyNode: 直接取官方镜像产物 (双架构 amd64/arm64), 应用在 /opt/easynode
+COPY --from=chaoszhu/easynode:latest /easynode /opt/easynode
 
 COPY scripts/ /opt/scripts/
 COPY wssh-server.py /usr/local/bin/wssh-server
