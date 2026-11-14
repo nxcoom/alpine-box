@@ -281,11 +281,18 @@ else
   warn "python3/wssh-server 不可用, 状态页与 WS 桥不可用"
 fi
 
-# ---------- 3.7 面板自检: easynode 无响应时把平台路由让回给 wssh ----------
+# ---------- 3.7 面板自检: easynode 已在平台路由端口启动, 60s 未就绪才回退 wssh ----------
+# 注意: 等待期间 wssh 绝不能占用 $PORT, 否则 node 就绪后会 EADDRINUSE 崩溃循环
 if [ "$WEB_PANEL_ON_PORT" = "easynode" ] && [ "$EASYNODE_ENABLED" = "true" ]; then
   (
-    sleep 8
-    if ! curl -s -o /dev/null -m 5 "http://127.0.0.1:$PORT/"; then
+    n=0; up=""
+    while [ $n -lt 30 ]; do
+      if curl -s -o /dev/null -m 3 "http://127.0.0.1:$PORT/"; then up=true; break; fi
+      sleep 2; n=$((n+1))
+    done
+    if [ "$up" = "true" ]; then
+      printf '%b\n' "${GREEN}[alpine-box]${NC} easynode 自检通过, 面板在端口 $PORT"
+    else
       {
         echo "== easynode 自检失败 @ $(date -u '+%FT%TZ') (端口 $PORT)"
         echo "-- netstat:"; netstat -tln 2>/dev/null | head -20
@@ -295,9 +302,7 @@ if [ "$WEB_PANEL_ON_PORT" = "easynode" ] && [ "$EASYNODE_ENABLED" = "true" ]; th
       echo false > /run/.alpine-box-easynode-enabled
       rc-service easynode stop >/dev/null 2>&1 || true
       start_wssh "$PORT"
-      printf '%b\n' "${YELLOW}[alpine-box]${NC} easynode 自检失败, 状态页/SSH 桥已接管端口 $PORT (诊断: /var/log/easynode-fallback.log)"
-    else
-      printf '%b\n' "${GREEN}[alpine-box]${NC} easynode 自检通过 (端口 $PORT)"
+      printf '%b\n' "${YELLOW}[alpine-box]${NC} easynode 60s 未就绪, 状态页/SSH 桥已接管端口 $PORT (诊断: /var/log/easynode-fallback.log)"
     fi
   ) &
 fi
