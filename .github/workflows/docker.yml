@@ -52,6 +52,13 @@ jobs:
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
             root@127.0.0.1 'echo SSH_LOGIN_OK; guan version; tunc status | head -8'
 
+      - name: SSH over WebSocket 桥测试
+        run: |
+          ssh -i /tmp/tkey/id_ed25519 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 \
+            -o ProxyCommand="python3 tools/wssh.py pipe --host 127.0.0.1 --port 18000" \
+            root@127.0.0.1 'echo WSSH_BRIDGE_OK; guan version'
+
       - name: 状态页测试
         run: |
           for i in $(seq 1 15); do

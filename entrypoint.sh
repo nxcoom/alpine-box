@@ -176,11 +176,19 @@ write_status() {
   } > "$STATUS_DIR/index.html" 2>/dev/null
 }
 ( while :; do write_status; sleep 10; done ) &
-if command -v httpd >/dev/null 2>&1; then
-  httpd -f -p "$PORT" -h "$STATUS_DIR" 2>/dev/null &
-  log "状态页已启动: 端口 $PORT (/var/www/status)"
+
+# ---------- 3.6 SSH over WebSocket 桥 (经平台 HTTPS 路由远程访问容器 SSH) ----------
+# WS 路径 /ssh 双向桥接到本机 sshd; 配合客户端 tools/wssh.py:
+#   ssh -o ProxyCommand="python3 wssh.py pipe --host <域名> --tls" root@<域名>
+FIRST_SSH_PORT=$(printf '%s' "$PORTS" | head -n 1)
+start_wssh() {
+  python3 /usr/local/bin/wssh-server "$PORT" "$STATUS_DIR" 127.0.0.1 "$FIRST_SSH_PORT" >/dev/null 2>&1 &
+}
+if command -v python3 >/dev/null 2>&1 && [ -x /usr/local/bin/wssh-server ]; then
+  start_wssh
+  log "状态页 + SSH over WebSocket 桥已启动: 端口 $PORT (WS 路径 /ssh → 本机 sshd:$FIRST_SSH_PORT)"
 else
-  warn "未找到 httpd (busybox-extras), 状态页不可用"
+  warn "python3/wssh-server 不可用, 状态页与 WS 桥不可用"
 fi
 
 # ---------- 4. 看门狗: 每 30s 检查, 服务被杀后自动拉起 ----------
@@ -198,6 +206,10 @@ fi
       rc-service tunc stop >/dev/null 2>&1
       rc-service tunc start >/dev/null 2>&1 \
         && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 tunc" || true
+    fi
+    if ! pgrep -f 'wssh-server' >/dev/null 2>&1; then
+      start_wssh 2>/dev/null \
+        && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 wssh-server" || true
     fi
   done
 ) &

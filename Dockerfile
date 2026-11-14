@@ -14,16 +14,17 @@ ENV SSH_ENABLED=true \
     SHOW_LOG=true \
     TZ=UTC
 
-RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata busybox-extras
+RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata python3
 
 COPY scripts/ /opt/scripts/
+COPY wssh-server.py /usr/local/bin/wssh-server
 COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck
 
 # 注册工具命令; tunc 采用测试根目录模式安装:
 #   一次下载 cloudflared, 同时产出 OpenRC 服务文件 (/usr/local/share/tunc.openrc-init)
 #   运行时 entrypoint 再装入 /etc/init.d/tunc (容器内 OpenRC 引导)
-RUN chmod +x /entrypoint.sh /usr/local/bin/healthcheck \
+RUN chmod +x /entrypoint.sh /usr/local/bin/healthcheck /usr/local/bin/wssh-server \
  && cp /opt/scripts/ssh.sh  /usr/local/bin/sshx && chmod 755 /usr/local/bin/sshx \
  && cp /opt/scripts/guan.sh /usr/local/bin/guan && chmod 755 /usr/local/bin/guan \
  && mkdir -p /usr/local/lib/tunc /etc/tunc /run/openrc \
@@ -38,7 +39,7 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/healthcheck \
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s CMD /usr/local/bin/healthcheck
 
-# 3000: 状态页 (服务状态 + tunc/messages 日志尾部)
+# 3000: 状态页 + SSH over WebSocket 桥 (wssh, 经平台 HTTPS 路由访问容器 SSH)
 EXPOSE 3000
 
 ENTRYPOINT ["/entrypoint.sh"]

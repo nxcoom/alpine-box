@@ -29,19 +29,36 @@ Alpine 系统镜像，集成三个运维工具，可直接部署到 [deployzy](h
 | `FILE_PATH` | `/var/lib/alpine-box` | 数据目录，SSH 主机密钥持久化在其中 `host-keys/` |
 | `PORT` | `3000` | 状态页监听端口（deployzy 平台默认探测 3000） |
 
-## 状态页
+## 状态页与 SSH over WebSocket 桥
 
-容器内 3000 端口运行一个 busybox httpd（`http://<host>:3000/`），输出当前服务状态与日志尾部，方便通过平台 HTTP 路由远程检查：
+容器内 3000 端口运行 `wssh-server`（纯 Python 标准库）：
+
+- `http://<host>:3000/` — 状态页（服务状态 + 出站探测 + 日志尾部），平台 HTTP 路由远程检查用
+- `ws(s)://<host>:3000/ssh` — WebSocket → 本机 sshd 的双向桥，可穿透 HTTPS 反代/CDN 访问容器 SSH
 
 ```
 alpine-box status @ 2026-11-14T08:00:00Z
 sshd : RUNNING
 tunc : RUNNING
 tunnel-token: SET
-
-== tunc.log (tail 20) ==
 ...
 ```
+
+### 通过平台路由连接 SSH（无需隧道/端口开放）
+
+从仓库 `tools/` 下载 `wssh.py`（纯标准库，客户端只需有 python3），然后：
+
+```bash
+# 方式一：ProxyCommand 一次性直连（推荐）
+ssh -o ProxyCommand="python3 wssh.py pipe --host alpine-box.deployzy.app --tls" \
+    -o StrictHostKeyChecking=accept-new root@alpine-box
+
+# 方式二：本地端口转发
+python3 wssh.py tunnel --host alpine-box.deployzy.app --tls --local 2222
+ssh -p 2222 root@127.0.0.1
+```
+
+在正常网络（自有 VPS）上，仍然优先走 Cloudflare Tunnel：隧道 ingress 指向 `ssh://localhost:<SSH_PORT>`，用 `cloudflared access tcp` 直连即可。WS 桥是隧道不可用（平台封锁 7844 等）时的通用兜底 —— 认证由 sshd 公钥完成，安全性等同暴露 22 端口。
 
 ## 部署到 deployzy
 
