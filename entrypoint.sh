@@ -179,7 +179,32 @@ if [ "$EASYNODE_ENABLED" = "true" ] && [ -f /opt/easynode/index.js ]; then
     rc-update add easynode default 2>/dev/null || true
   fi
   if rc-service easynode start; then
-    log "EasyNode 已启动: http://0.0.0.0:$EASYNODE_HTTP_PORT (初始账号密码见 /var/log/easynode.log)"
+    log "EasyNode 已启动: http://0.0.0.0:$EASYNODE_HTTP_PORT"
+    # 环境变量指定管理员账号 (幂等): 摆脱"初始密码只在日志里"的限制, 重部署后凭据稳定
+    if [ -n "${EASYNODE_ADMIN_USER:-}" ] && [ -n "${EASYNODE_ADMIN_PASSWORD:-}" ]; then
+      (
+        n=0
+        while [ $n -lt 30 ]; do
+          [ -s /opt/easynode/app/db/key.db ] && break
+          sleep 2; n=$((n+1))
+        done
+        ok=""
+        m=0
+        while [ $m -lt 3 ]; do
+          if ( cd /opt/easynode && node /usr/local/bin/easynode-set-creds.mjs >>/var/log/easynode.log 2>&1 ); then
+            ok=true; break
+          fi
+          sleep 5; m=$((m+1))
+        done
+        if [ "$ok" = "true" ]; then
+          log "EasyNode 管理员账号已按环境变量设置: $EASYNODE_ADMIN_USER"
+        else
+          warn "EasyNode 凭据设置脚本失败, 详情见 /var/log/easynode.log"
+        fi
+      ) &
+    else
+      log "未设置 EASYNODE_ADMIN_USER/PASSWORD, 初始账号密码见 /var/log/easynode.log"
+    fi
   else
     err "EasyNode 启动失败, 可通过 /var/log/easynode.log 查看"
   fi

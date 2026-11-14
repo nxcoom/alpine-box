@@ -30,6 +30,8 @@ Alpine 系统镜像，集成三个运维工具，可直接部署到 [deployzy](h
 | `PORT` | `3000` | 平台 HTTP 路由端口（deployzy 平台默认探测 3000） |
 | `EASYNODE_ENABLED` | `true` | 是否启动 EasyNode 面板 |
 | `EASYNODE_HTTP_PORT` | `8082` | EasyNode HTTP 端口（`WEB_PANEL_ON_PORT=easynode` 时自动改绑 `PORT`） |
+| `EASYNODE_ADMIN_USER` | 空 | 设置面板管理员用户名（与 `EASYNODE_ADMIN_PASSWORD` 同时设置时生效） |
+| `EASYNODE_ADMIN_PASSWORD` | 空 | 设置面板管理员密码（幂等，重部署后凭据稳定；不设则用日志里的初始随机密码） |
 | `WEB_PANEL_ON_PORT` | `wssh` | 平台 HTTP 路由指向哪个 web 服务：`wssh`（状态页+SSH桥）或 `easynode`（管理面板） |
 | `TUNNEL_TRANSPORT_PROTOCOL` | 空 | 透传给 cloudflared（如 `http2`，经 OpenRC conf.d 注入） |
 | `TUNNEL_EDGE_IP_VERSION` | 空 | 透传给 cloudflared（如 `4`/`6`） |
@@ -39,7 +41,7 @@ Alpine 系统镜像，集成三个运维工具，可直接部署到 [deployzy](h
 集成 [chaos-zhu/easynode](https://github.com/chaos-zhu/easynode) 官方应用（`/opt/easynode`，OpenRC 服务 `easynode`，guan 可直接管理）：
 
 - 访问：`http://<host>:8082`（或 `WEB_PANEL_ON_PORT=easynode` 时经平台路由 `https://<域名>` 访问）
-- 初始账号密码：**首次启动时写入 `/var/log/easynode.log`**，也可在状态页 `easynode.log` 段落查看；登录后请立即修改
+- 管理员账号：设置 `EASYNODE_ADMIN_USER` + `EASYNODE_ADMIN_PASSWORD` 环境变量即可（推荐，重部署后凭据稳定）；不设置则每次首次启动随机生成，写在 `/var/log/easynode.log`（状态页 `easynode.log` 段落可见）
 - 数据（账号/凭据/脚本库）持久化在 `FILE_PATH/easynode/`，容器重建不丢失
 - 未集成 guacd（RDP 远程桌面不可用）；SSH/SFTP/脚本库/监控等核心功能不受影响
 - 面板自动更新（watchtower）未集成，跟随镜像重建更新

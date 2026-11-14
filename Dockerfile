@@ -24,6 +24,7 @@ COPY --from=chaoszhu/easynode:latest /easynode /opt/easynode
 
 COPY scripts/ /opt/scripts/
 COPY wssh-server.py /usr/local/bin/wssh-server
+COPY easynode-set-creds.mjs /usr/local/bin/easynode-set-creds.mjs
 COPY easynode.openrc-init /usr/local/share/easynode.openrc-init
 COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck
@@ -32,6 +33,7 @@ COPY healthcheck.sh /usr/local/bin/healthcheck
 #   一次下载 cloudflared, 同时产出 OpenRC 服务文件 (/usr/local/share/tunc.openrc-init)
 #   运行时 entrypoint 再装入 /etc/init.d/tunc (容器内 OpenRC 引导)
 RUN chmod +x /entrypoint.sh /usr/local/bin/healthcheck /usr/local/bin/wssh-server \
+ && chmod 755 /usr/local/bin/easynode-set-creds.mjs \
  && cp /opt/scripts/ssh.sh  /usr/local/bin/sshx && chmod 755 /usr/local/bin/sshx \
  && cp /opt/scripts/guan.sh /usr/local/bin/guan && chmod 755 /usr/local/bin/guan \
  && mkdir -p /usr/local/lib/tunc /etc/tunc /run/openrc \
