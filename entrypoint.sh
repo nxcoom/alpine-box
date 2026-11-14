@@ -191,7 +191,7 @@ if [ "$EASYNODE_ENABLED" = "true" ] && [ -f /opt/easynode/index.js ]; then
         ok=""
         m=0
         while [ $m -lt 3 ]; do
-          if ( cd /opt/easynode && node /usr/local/bin/easynode-set-creds.mjs >>/var/log/easynode.log 2>&1 ); then
+          if ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs >>/var/log/easynode.log 2>&1 ); then
             ok=true; break
           fi
           sleep 5; m=$((m+1))

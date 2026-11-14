@@ -90,7 +90,7 @@ jobs:
           echo "HTTP $CODE, body bytes: $(wc -c < /tmp/easynode.html)"
           [ "$CODE" = "200" ] || { echo EASYNODE_PANEL_FAIL; exit 1; }
           # 环境变量凭据脚本幂等性 (entrypoint 已异步执行过一次, 此处应报 already set 且 exit 0)
-          docker exec alpine-box-test sh -c 'cd /opt/easynode && node /usr/local/bin/easynode-set-creds.mjs'
+          docker exec alpine-box-test sh -c 'cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs'
           echo EASYNODE_PANEL_OK
 
       - name: 容器日志
