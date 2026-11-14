@@ -257,15 +257,23 @@ else
 fi
 
 # ---------- 3.7 EasyNode 编排: 凭据设置 (停服窗口写 NeDB) + 平台路由自检 ----------
-# NeDB 不能与运行中的应用并发写 (上游 reset-password.js 同样要求先停服):
-# 等应用首次启动生成 key.db → 停服 → 写入环境变量凭据 → 重启 → 自检/回退
+# NeDB 不能与运行中的应用并发写 (上游 reset-password.js 同样要求先停服)。
+# 时机: 必须等应用 HTTP 完全就绪 (初始化全部结束) 再停服改写, 否则应用初始化
+# 收尾时会用随机凭据覆盖外部修改 (db.js: 无账号记录则生成随机 user/pwd 并 $set)。
 if [ "$EASYNODE_ENABLED" = "true" ]; then
   (
-    # 1. 等待应用生成 key.db
-    n=0
-    while [ $n -lt 45 ] && ! [ -s /opt/easynode/app/db/key.db ]; do sleep 2; n=$((n+1)); done
-    # 2. 环境变量凭据: 停服 → 写入 → 重启 (重部署后凭据稳定, 不依赖日志里的随机密码)
-    if [ -s /opt/easynode/app/db/key.db ] && [ -n "${EASYNODE_ADMIN_USER:-}" ] && [ -n "${EASYNODE_ADMIN_PASSWORD:-}" ]; then
+    wait_http() { # $1=port
+      n=0
+      while [ $n -lt 45 ]; do
+        curl -s -o /dev/null -m 3 "http://127.0.0.1:$1/" && return 0
+        sleep 2; n=$((n+1))
+      done
+      return 1
+    }
+    # 1. 等应用完全启动 (HTTP 应答 = key.db 已写入完整记录含 RSA 密钥)
+    if wait_http "$EASYNODE_HTTP_PORT" \
+       && [ -n "${EASYNODE_ADMIN_USER:-}" ] && [ -n "${EASYNODE_ADMIN_PASSWORD:-}" ]; then
+      # 2. 停服 → 写凭据 → 重启 (应用检测到已有账号记录, 不会重新生成随机密码)
       rc-service easynode stop >/dev/null 2>&1
       ok=""
       m=0
@@ -281,10 +289,10 @@ if [ "$EASYNODE_ENABLED" = "true" ]; then
       else
         warn "EasyNode 凭据设置脚本失败, 详情见 /var/log/easynode.log"
       fi
-    elif [ ! -s /opt/easynode/app/db/key.db ]; then
-      warn "EasyNode key.db 90s 未生成, 凭据沿用应用随机生成 (见 /var/log/easynode.log)"
+    elif ! curl -s -o /dev/null -m 3 "http://127.0.0.1:$EASYNODE_HTTP_PORT/"; then
+      warn "EasyNode 90s 未在 $EASYNODE_HTTP_PORT 就绪, 跳过凭据设置 (随机密码见 /var/log/easynode.log)"
     fi
-    # 3. 平台路由自检: easynode 模式下面板必须应答, 90s 未就绪则回退 wssh
+    # 3. 平台路由自检: easynode 模式下面板必须应答, 未就绪则回退 wssh
     #    (等待期间 wssh 绝不能占用 $PORT, 否则 node 就绪后会 EADDRINUSE 崩溃循环)
     if [ "$WEB_PANEL_ON_PORT" = "easynode" ]; then
       n=0; up=""
