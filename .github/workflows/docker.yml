@@ -26,7 +26,7 @@ jobs:
           mkdir -p /tmp/tkey
           ssh-keygen -q -t ed25519 -N '' -f /tmp/tkey/id_ed25519
           docker run -d --name alpine-box-test \
-            -p 127.0.0.1:2022:2022 -p 127.0.0.1:18000:3000 -p 127.0.0.1:18082:8082 \
+            -p 127.0.0.1:2022:2022 -p 127.0.0.1:18000:3000 -p 127.0.0.1:18082:8082 -p 127.0.0.1:18090:8090 \
             -e SSH_ENABLED=true -e SSH_PORT=2022 -e SHOW_LOG=true \
             -e EASYNODE_ADMIN_USER=ci-admin -e EASYNODE_ADMIN_PASSWORD=ci-test-password-2026 \
             -e SSH_PUBLIC_KEY="$(cat /tmp/tkey/id_ed25519.pub)" \
@@ -66,6 +66,17 @@ jobs:
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 \
             -o ProxyCommand="python3 tools/wssh.py pipe --host 127.0.0.1 --port 18000 --transport poll" \
             root@127.0.0.1 'echo WSSH_POLL_OK'
+
+      - name: wstunnel 隧道测试 (客户端 → 服务端 → sshd)
+        run: |
+          curl -fsSL -o /tmp/wt.tar.gz https://github.com/erebe/wstunnel/releases/download/v11.1.0/wstunnel_11.1.0_linux_amd64.tar.gz
+          mkdir -p /tmp/wt && tar xzf /tmp/wt.tar.gz -C /tmp/wt
+          /tmp/wt/wstunnel client ws://127.0.0.1:18090 -L tcp://127.0.0.1:18081:127.0.0.1:2022 > /tmp/wt-c.log 2>&1 &
+          sleep 4
+          B=$(timeout 8 bash -c 'exec 3<>/dev/tcp/127.0.0.1/18081; head -c 20 <&3' 2>/dev/null | head -c 20)
+          echo "banner: ${B:-无}"
+          [[ "$B" == SSH-2.0* ]] || { echo WSTUNNEL_FAIL; exit 1; }
+          echo WSTUNNEL_OK
 
       - name: 状态页测试
         run: |

@@ -14,4 +14,8 @@ if [ "$(cat /run/.alpine-box-easynode-enabled 2>/dev/null || echo true)" = "true
    && ! pgrep -f 'index[.]js' >/dev/null 2>&1; then
   exit 1
 fi
+if [ "$(cat /run/.alpine-box-wstunnel-enabled 2>/dev/null || echo true)" = "true" ] \
+   && ! pgrep -f 'wstunnel server' >/dev/null 2>&1; then
+  exit 1
+fi
 exit 0

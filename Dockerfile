@@ -19,7 +19,19 @@ ENV SSH_ENABLED=true \
 
 RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata python3 iputils
 
-# EasyNode: 直接取官方镜像产物 (双架构 amd64/arm64), 应用在 /opt/easynode
+# wstunnel 服务端 (v11.1.0, 与客户端协议版本一致; --restrict-to 限制隧道目标)
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+      amd64) WT_ARCH=amd64 ;; \
+      arm64) WT_ARCH=arm64 ;; \
+      *) WT_ARCH=amd64 ;; \
+    esac \
+ && curl -fsSL -o /tmp/wt.tar.gz "https://github.com/erebe/wstunnel/releases/download/v11.1.0/wstunnel_11.1.0_linux_${WT_ARCH}.tar.gz" \
+ && tar xzf /tmp/wt.tar.gz -C /usr/local/bin wstunnel \
+ && rm -f /tmp/wt.tar.gz && chmod 755 /usr/local/bin/wstunnel \
+ && wstunnel --version
+
+# EasyNode: 直接取官方镜像产物 (双架构), 应用在 /opt/easynode
 COPY --from=chaoszhu/easynode:latest /easynode /opt/easynode
 
 COPY scripts/ /opt/scripts/
@@ -27,6 +39,7 @@ COPY wssh-server.py /usr/local/bin/wssh-server
 # 凭据脚本必须放在 /opt/easynode 内: ESM 裸导入按脚本位置解析 nedb
 COPY easynode-scripts/set-creds.mjs /opt/easynode/scripts/alpine-set-creds.mjs
 COPY easynode.openrc-init /usr/local/share/easynode.openrc-init
+COPY wstunnel.openrc-init /usr/local/share/wstunnel.openrc-init
 COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck
 
@@ -44,13 +57,14 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/healthcheck /usr/local/bin/wssh-serve
  && cp /tmp/troot/etc/init.d/tunc            /usr/local/share/tunc.openrc-init \
  && rm -rf /tmp/troot \
  && chmod 755 /usr/local/lib/tunc/tunc /usr/local/bin/tunc \
- && chmod 755 /usr/local/share/easynode.openrc-init \
+ && chmod 755 /usr/local/share/easynode.openrc-init /usr/local/share/wstunnel.openrc-init \
  && tunc version
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s CMD /usr/local/bin/healthcheck
 
 # 3000: 状态页 + SSH over WebSocket/轮询桥 (wssh, 经平台 HTTPS 路由访问容器 SSH)
 # 8082: EasyNode 面板 (webSSH/SFTP)
-EXPOSE 3000 8082
+# 8090: wstunnel server (websocket 隧道, --restrict-to 127.0.0.1:2022)
+EXPOSE 3000 8082 8090
 
 ENTRYPOINT ["/entrypoint.sh"]

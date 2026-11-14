@@ -26,6 +26,9 @@ EASYNODE_ENABLED="${EASYNODE_ENABLED:-true}"
 EASYNODE_HTTP_PORT="${EASYNODE_HTTP_PORT:-8082}"
 # 平台 HTTP 路由指向哪个 web 服务: wssh(默认, 状态页+SSH桥) 或 easynode(管理面板)
 WEB_PANEL_ON_PORT="${WEB_PANEL_ON_PORT:-wssh}"
+WSTUNNEL_ENABLED="${WSTUNNEL_ENABLED:-true}"
+WSTUNNEL_PORT="${WSTUNNEL_PORT:-8090}"
+WSTUNNEL_RESTRICT_TO="${WSTUNNEL_RESTRICT_TO:-127.0.0.1:2022}"
 
 GREEN='\033[0;32m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { printf '%b\n' "${GREEN}[alpine-box]${NC} $*"; }
@@ -41,8 +44,10 @@ to_bool() {
 SSH_ENABLED=$(to_bool "$SSH_ENABLED")
 SHOW_LOG=$(to_bool "$SHOW_LOG")
 EASYNODE_ENABLED=$(to_bool "$EASYNODE_ENABLED")
+WSTUNNEL_ENABLED=$(to_bool "$WSTUNNEL_ENABLED")
 echo "$SSH_ENABLED" > /run/.alpine-box-ssh-enabled
 echo "$EASYNODE_ENABLED" > /run/.alpine-box-easynode-enabled
+echo "$WSTUNNEL_ENABLED" > /run/.alpine-box-wstunnel-enabled
 
 # 平台 HTTP 路由端口归属: wssh(默认) 或 easynode
 WSSH_BIND_PORT="$PORT"
@@ -191,6 +196,25 @@ else
   log "EASYNODE_ENABLED=false, 跳过 EasyNode"
 fi
 
+# ---------- 2.6 wstunnel 服务端 (websocket 隧道, 供 wstunnel.exe 等客户端接入) ----------
+if [ "$WSTUNNEL_ENABLED" = "true" ] && [ -x /usr/local/bin/wstunnel ] && [ -f /usr/local/share/wstunnel.openrc-init ]; then
+  cp /usr/local/share/wstunnel.openrc-init /etc/init.d/wstunnel
+  chmod 755 /etc/init.d/wstunnel
+  rc-update add wstunnel default 2>/dev/null || true
+  # OpenRC 不透传调用方环境变量, 参数经 conf.d 注入
+  {
+    echo "export WSTUNNEL_PORT='$WSTUNNEL_PORT'"
+    echo "export WSTUNNEL_RESTRICT_TO='$WSTUNNEL_RESTRICT_TO'"
+  } > /etc/conf.d/wstunnel
+  if rc-service wstunnel start; then
+    log "wstunnel 服务端已启动: ws://0.0.0.0:$WSTUNNEL_PORT (仅允许隧道到 $WSTUNNEL_RESTRICT_TO)"
+  else
+    err "wstunnel 启动失败, 详见 /var/log/wstunnel.log"
+  fi
+else
+  log "WSTUNNEL_ENABLED=false 或二进制缺失, 跳过 wstunnel"
+fi
+
 # ---------- 3. 系统日志 (busybox syslogd, guan 菜单可查看) ----------
 syslogd -O /var/log/messages -s 1024 2>/dev/null || true
 
@@ -204,6 +228,7 @@ write_status() {
     echo "tunc : $(pgrep -f 'local/lib/tunc/tunc' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo "tunnel-token: $([ -s /etc/tunc/token ] && echo SET || echo NONE)"
     echo "easynode: $(pgrep -f 'index[.]js' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
+    echo "wstunnel: $(pgrep -f 'wstunnel server' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo
     echo "== 网络出站探测 =="
     for hp in region1.v2.argotunnel.com:7844 api.cloudflare.com:443 www.cloudflare.com:443 github.com:443; do
@@ -227,6 +252,9 @@ write_status() {
     echo
     echo "== easynode-orchestrator.log =="
     tail -n 15 /var/log/easynode-orchestrator.log 2>/dev/null
+    echo
+    echo "== wstunnel.log (tail 10) =="
+    tail -n 10 /var/log/wstunnel.log 2>/dev/null
     echo
     echo "== tunc.log (tail 40) =="
     tail -n 40 /var/log/tunc.log 2>/dev/null
@@ -368,6 +396,12 @@ fi
     if ! pgrep -f 'wssh-server' >/dev/null 2>&1; then
       start_wssh 2>/dev/null \
         && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 wssh-server" || true
+    fi
+    if [ "$(cat /run/.alpine-box-wstunnel-enabled 2>/dev/null)" = "true" ] \
+       && [ -f /etc/init.d/wstunnel ] \
+       && ! pgrep -f 'wstunnel server' >/dev/null 2>&1; then
+      rc-service wstunnel start >/dev/null 2>&1 \
+        && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 wstunnel" || true
     fi
     if [ "$(cat /run/.alpine-box-easynode-enabled 2>/dev/null)" = "true" ] \
        && [ ! -f /run/.alpine-box-easynode-paused ] \

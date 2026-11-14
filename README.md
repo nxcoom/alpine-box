@@ -33,6 +33,9 @@ Alpine 系统镜像，集成三个运维工具，可直接部署到 [deployzy](h
 | `EASYNODE_ADMIN_USER` | 空 | 设置面板管理员用户名（与 `EASYNODE_ADMIN_PASSWORD` 同时设置时生效） |
 | `EASYNODE_ADMIN_PASSWORD` | 空 | 设置面板管理员密码（幂等，重部署后凭据稳定；不设则用日志里的初始随机密码） |
 | `WEB_PANEL_ON_PORT` | `wssh` | 平台 HTTP 路由指向哪个 web 服务：`wssh`（状态页+SSH桥）或 `easynode`（管理面板） |
+| `WSTUNNEL_ENABLED` | `true` | 是否启动 wstunnel 服务端 |
+| `WSTUNNEL_PORT` | `8090` | wstunnel 服务端 WebSocket 监听端口 |
+| `WSTUNNEL_RESTRICT_TO` | `127.0.0.1:2022` | 限制隧道目标（默认仅允许 SSH 到本机，防止被当公网代理滥用） |
 | `TUNNEL_TRANSPORT_PROTOCOL` | 空 | 透传给 cloudflared（如 `http2`，经 OpenRC conf.d 注入） |
 | `TUNNEL_EDGE_IP_VERSION` | 空 | 透传给 cloudflared（如 `4`/`6`） |
 
@@ -80,6 +83,20 @@ ssh -p 2222 root@127.0.0.1
 在正常网络（自有 VPS）上，仍然优先走 Cloudflare Tunnel：隧道 ingress 指向 `ssh://localhost:<SSH_PORT>`，用 `cloudflared access tcp` 直连即可。WS/轮询桥是隧道不可用（平台封锁 7844 等）时的通用兜底 —— 认证由 sshd 公钥完成，安全性等同暴露 22 端口。
 
 > 注：deployzy 自带的 `deployzy tcp`（暴露 TCP 端口到 `deployzy.com:<10000-60000>`）需要 Pro 套餐，免费版会报 "tcp tunnels require a paid plan"。
+
+## wstunnel 隧道（供 wstunnel.exe 等客户端）
+
+镜像内置 [erebe/wstunnel](https://github.com/erebe/wstunnel) **v11.1.0 服务端**（8090 端口，`--restrict-to 127.0.0.1:2022` 仅允许隧道到本机 sshd）。Windows 客户端示例：
+
+```bash
+wstunnel.exe client wss://alpine-box-wstunnel.deployzy.app -L tcp://127.0.0.1:11080:127.0.0.1:2022
+ssh -p 11080 root@127.0.0.1
+```
+
+- 客户端与服务端必须同为 **v11.x**（客户端 `wstunnel.exe --version` 确认）
+- 必须用 `wss://`（HTTPS 443），`ws://` 明文 80 端口会被 Cloudflare 301 拒掉
+- deployzy 平台边缘对 WebSocket 升级拦截不稳定，wstunnel 客户端自带重试，多数情况可建立；自有 VPS 部署则无此限制
+- 服务端限制隧道目标为 `127.0.0.1:2022`，可改 `WSTUNNEL_RESTRICT_TO`（不建议放开）
 
 ## 部署到 deployzy
 

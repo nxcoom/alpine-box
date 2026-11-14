@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="wstunnel server (websocket tunnel, restricted to localhost:2022)"
+
+supervisor=supervise-daemon
+command="/usr/local/bin/wstunnel"
+command_args="server ws://0.0.0.0:${WSTUNNEL_PORT:-8090} --restrict-to ${WSTUNNEL_RESTRICT_TO:-127.0.0.1:2022}"
+output_log="/var/log/wstunnel.log"
+error_log="/var/log/wstunnel.log"
+
+depend() {
+	need net
+}
+
+start_pre() {
+	export WSTUNNEL_PORT="${WSTUNNEL_PORT:-8090}"
+	export WSTUNNEL_RESTRICT_TO="${WSTUNNEL_RESTRICT_TO:-127.0.0.1:2022}"
+}
