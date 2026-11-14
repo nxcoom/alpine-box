@@ -225,6 +225,9 @@ write_status() {
     echo "== easynode-fallback.log =="
     tail -n 30 /var/log/easynode-fallback.log 2>/dev/null
     echo
+    echo "== easynode-orchestrator.log =="
+    tail -n 15 /var/log/easynode-orchestrator.log 2>/dev/null
+    echo
     echo "== tunc.log (tail 40) =="
     tail -n 40 /var/log/tunc.log 2>/dev/null
     echo
@@ -271,25 +274,34 @@ if [ "$EASYNODE_ENABLED" = "true" ]; then
       return 1
     }
     # 1. 等应用完全启动 (HTTP 应答 = key.db 已写入完整记录含 RSA 密钥)
+    ORCH_LOG=/var/log/easynode-orchestrator.log
+    orch() { echo "$(date -u '+%FT%TZ') $*" >> "$ORCH_LOG"; }
+    orch "=== 编排开始"
     if wait_http "$EASYNODE_HTTP_PORT" \
        && [ -n "${EASYNODE_ADMIN_USER:-}" ] && [ -n "${EASYNODE_ADMIN_PASSWORD:-}" ]; then
       # 2. 停服 → 写凭据 → 重启 (应用检测到已有账号记录, 不会重新生成随机密码)
+      #    暂停标记: 防止看门狗在停服窗口内把应用拉起 (与写入过程竞争)
+      touch /run/.alpine-box-easynode-paused
+      orch "wait_http ok, 停服写入凭据"
       rc-service easynode stop >/dev/null 2>&1
       ok=""
       m=0
       while [ $m -lt 3 ]; do
-        if ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs >>/var/log/easynode.log 2>&1 ); then
+        if ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs >>"$ORCH_LOG" 2>&1 ); then
           ok=true; break
         fi
         sleep 3; m=$((m+1))
       done
       rc-service easynode start >/dev/null 2>&1
+      rm -f /run/.alpine-box-easynode-paused
+      orch "重启完成 (patch ok=$ok)"
       if [ "$ok" = "true" ]; then
         log "EasyNode 管理员账号已按环境变量设置: $EASYNODE_ADMIN_USER"
       else
-        warn "EasyNode 凭据设置脚本失败, 详情见 /var/log/easynode.log"
+        warn "EasyNode 凭据设置脚本失败, 详情见 $ORCH_LOG"
       fi
     elif ! curl -s -o /dev/null -m 3 "http://127.0.0.1:$EASYNODE_HTTP_PORT/"; then
+      orch "wait_http FAIL (90s), 跳过凭据设置"
       warn "EasyNode 90s 未在 $EASYNODE_HTTP_PORT 就绪, 跳过凭据设置 (随机密码见 /var/log/easynode.log)"
     fi
     # 3. 平台路由自检: easynode 模式下面板必须应答, 未就绪则回退 wssh
@@ -339,6 +351,7 @@ fi
         && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 wssh-server" || true
     fi
     if [ "$(cat /run/.alpine-box-easynode-enabled 2>/dev/null)" = "true" ] \
+       && [ ! -f /run/.alpine-box-easynode-paused ] \
        && [ -f /etc/init.d/easynode ] \
        && ! pgrep -f 'index[.]js' >/dev/null 2>&1; then
       rc-service easynode stop >/dev/null 2>&1
