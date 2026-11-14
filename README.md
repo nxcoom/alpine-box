@@ -58,7 +58,11 @@ python3 wssh.py tunnel --host alpine-box.deployzy.app --tls --local 2222
 ssh -p 2222 root@127.0.0.1
 ```
 
-在正常网络（自有 VPS）上，仍然优先走 Cloudflare Tunnel：隧道 ingress 指向 `ssh://localhost:<SSH_PORT>`，用 `cloudflared access tcp` 直连即可。WS 桥是隧道不可用（平台封锁 7844 等）时的通用兜底 —— 认证由 sshd 公钥完成，安全性等同暴露 22 端口。
+传输自动降级：优先尝试 WebSocket（延迟低）；平台反代/CDN 拦截 WS 升级时（如 deployzy 边缘返回 502），自动切换为 HTTP 长轮询（纯 request/response，可穿透任何 HTTP 反代，延迟约一个 RTT）。也可用 `--transport poll` 强制指定。
+
+在正常网络（自有 VPS）上，仍然优先走 Cloudflare Tunnel：隧道 ingress 指向 `ssh://localhost:<SSH_PORT>`，用 `cloudflared access tcp` 直连即可。WS/轮询桥是隧道不可用（平台封锁 7844 等）时的通用兜底 —— 认证由 sshd 公钥完成，安全性等同暴露 22 端口。
+
+> 注：deployzy 自带的 `deployzy tcp`（暴露 TCP 端口到 `deployzy.com:<10000-60000>`）需要 Pro 套餐，免费版会报 "tcp tunnels require a paid plan"。
 
 ## 部署到 deployzy
 
