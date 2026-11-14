@@ -1,12 +1,15 @@
 # ============================================================
 #  alpine-box — Alpine 系统镜像
 #  集成: sshx (SSH 一键配置) / tunc (Cloudflare Tunnel) / guan (服务管理菜单)
+#        + EasyNode (webSSH/SFTP 管理面板) + wssh (SSH over HTTP 桥 + 状态页)
 #  平台环境变量: SSH_ENABLED / SSH_PORT / SSH_PUBLIC_KEY / CF_TOKEN / SHOW_LOG / FILE_PATH
 # ============================================================
-FROM alpine:3.22
+# 基础镜像用 node:22-alpine: EasyNode 的 node_modules 由 node22 构建,
+# ABI 必须与运行时一致; 两者同为 Alpine 系。
+FROM node:22-alpine
 
 LABEL org.opencontainers.image.title="alpine-box" \
-      org.opencontainers.image.description="Alpine 系统镜像: sshx (SSH) + tunc (Cloudflare Tunnel) + guan (服务管理), 支持 deployzy 平台环境变量" \
+      org.opencontainers.image.description="Alpine 系统镜像: sshx (SSH) + tunc (Cloudflare Tunnel) + guan (服务管理) + EasyNode (webSSH 面板) + wssh (SSH over HTTP 桥)" \
       org.opencontainers.image.licenses="MIT"
 
 ENV SSH_ENABLED=true \
@@ -14,10 +17,17 @@ ENV SSH_ENABLED=true \
     SHOW_LOG=true \
     TZ=UTC
 
-RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata python3
+RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata python3 iputils
+
+# EasyNode: 直接取官方镜像产物 (双架构), 应用在 /opt/easynode
+FROM chaoszhu/easynode:latest AS easynode
+
+FROM node:22-alpine
+COPY --from=easynode /easynode /opt/easynode
 
 COPY scripts/ /opt/scripts/
 COPY wssh-server.py /usr/local/bin/wssh-server
+COPY easynode.openrc-init /usr/local/share/easynode.openrc-init
 COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck
 
@@ -35,11 +45,13 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/healthcheck /usr/local/bin/wssh-serve
  && cp /tmp/troot/etc/init.d/tunc            /usr/local/share/tunc.openrc-init \
  && rm -rf /tmp/troot \
  && chmod 755 /usr/local/lib/tunc/tunc /usr/local/bin/tunc \
+ && chmod 755 /usr/local/share/easynode.openrc-init \
  && tunc version
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s CMD /usr/local/bin/healthcheck
 
-# 3000: 状态页 + SSH over WebSocket 桥 (wssh, 经平台 HTTPS 路由访问容器 SSH)
-EXPOSE 3000
+# 3000: 状态页 + SSH over WebSocket/轮询桥 (wssh, 经平台 HTTPS 路由访问容器 SSH)
+# 8082: EasyNode 面板 (webSSH/SFTP)
+EXPOSE 3000 8082
 
 ENTRYPOINT ["/entrypoint.sh"]

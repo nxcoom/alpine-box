@@ -9,4 +9,8 @@ if [ -s /etc/tunc/token ] && ! pgrep -f 'local/lib/tunc/tunc' >/dev/null 2>&1; t
   exit 1
 fi
 pgrep -f 'wssh-server' >/dev/null 2>&1 || exit 1
+if [ "$(cat /run/.alpine-box-easynode-enabled 2>/dev/null || echo true)" = "true" ] \
+   && ! pgrep -f 'index[.]js' >/dev/null 2>&1; then
+  exit 1
+fi
 exit 0

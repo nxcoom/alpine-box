@@ -21,7 +21,11 @@ SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-$DEFAULT_SSH_PUBLIC_KEY}"
 SHOW_LOG="${SHOW_LOG:-true}"
 CF_TOKEN="${CF_TOKEN:-}"
 FILE_PATH="${FILE_PATH:-/var/lib/alpine-box}"
-PORT="${PORT:-3000}"   # 状态页端口 (deployzy 平台默认探测 3000)
+PORT="${PORT:-3000}"   # 平台 HTTP 路由端口 (deployzy 默认探测 3000)
+EASYNODE_ENABLED="${EASYNODE_ENABLED:-true}"
+EASYNODE_HTTP_PORT="${EASYNODE_HTTP_PORT:-8082}"
+# 平台 HTTP 路由指向哪个 web 服务: wssh(默认, 状态页+SSH桥) 或 easynode(管理面板)
+WEB_PANEL_ON_PORT="${WEB_PANEL_ON_PORT:-wssh}"
 
 GREEN='\033[0;32m'; YELLOW='\033[0;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { printf '%b\n' "${GREEN}[alpine-box]${NC} $*"; }
@@ -36,7 +40,17 @@ to_bool() {
 }
 SSH_ENABLED=$(to_bool "$SSH_ENABLED")
 SHOW_LOG=$(to_bool "$SHOW_LOG")
+EASYNODE_ENABLED=$(to_bool "$EASYNODE_ENABLED")
 echo "$SSH_ENABLED" > /run/.alpine-box-ssh-enabled
+echo "$EASYNODE_ENABLED" > /run/.alpine-box-easynode-enabled
+
+# 平台 HTTP 路由端口归属: wssh(默认) 或 easynode
+WSSH_BIND_PORT="$PORT"
+if [ "$WEB_PANEL_ON_PORT" = "easynode" ]; then
+  EASYNODE_HTTP_PORT="$PORT"
+  WSSH_BIND_PORT=8080
+  log "平台路由端口 $PORT → EasyNode 面板 (wssh 桥/状态页改到 8080)"
+fi
 
 # cloudflared 边缘连接参数透传 (例如出口仅 IPv6 可用时: TUNNEL_EDGE_IP_VERSION=6)
 [ -n "${TUNNEL_EDGE_IP_VERSION:-}" ] && export TUNNEL_EDGE_IP_VERSION
@@ -131,6 +145,11 @@ if [ -f /usr/local/share/tunc.openrc-init ]; then
   chmod 755 /etc/init.d/tunc
   rc-update add tunc default 2>/dev/null || true
 fi
+# cloudflared 高级参数: OpenRC 不透传环境变量, 通过 conf.d 注入 (openrc-run 自动 source)
+CONF_D_TUNC=/etc/conf.d/tunc
+[ -n "${TUNNEL_TRANSPORT_PROTOCOL:-}" ] && echo "export TUNNEL_TRANSPORT_PROTOCOL='$TUNNEL_TRANSPORT_PROTOCOL'" >> "$CONF_D_TUNC"
+[ -n "${TUNNEL_EDGE_IP_VERSION:-}" ] && echo "export TUNNEL_EDGE_IP_VERSION='$TUNNEL_EDGE_IP_VERSION'" >> "$CONF_D_TUNC"
+[ -f "$CONF_D_TUNC" ] && log "tunc conf.d: $(cat "$CONF_D_TUNC" | tr '\n' '; ')"
 if [ -n "$CF_TOKEN" ]; then
   mkdir -p /etc/tunc
   printf '%s' "$CF_TOKEN" > /etc/tunc/token
@@ -142,6 +161,30 @@ if [ -n "$CF_TOKEN" ]; then
   fi
 else
   log "未设置 CF_TOKEN, 不启动 Cloudflare Tunnel (之后可用 tunc token <TOKEN> && tunc start)"
+fi
+
+# ---------- 2.5 EasyNode 管理面板 (webSSH/SFTP) ----------
+if [ "$EASYNODE_ENABLED" = "true" ] && [ -f /opt/easynode/index.js ]; then
+  # 数据库持久化: /opt/easynode/app/db → FILE_PATH/easynode (凭据/配置跨重建保留)
+  if mkdir -p "$FILE_PATH/easynode" 2>/dev/null && [ -w "$FILE_PATH/easynode" ]; then
+    rm -rf /opt/easynode/app/db
+    ln -s "$FILE_PATH/easynode" /opt/easynode/app/db
+    log "EasyNode 数据目录: $FILE_PATH/easynode"
+  else
+    warn "FILE_PATH 不可写, EasyNode 数据不持久化 (容器重建后面板账号会重置)"
+  fi
+  if [ -f /usr/local/share/easynode.openrc-init ]; then
+    cp /usr/local/share/easynode.openrc-init /etc/init.d/easynode
+    chmod 755 /etc/init.d/easynode
+    rc-update add easynode default 2>/dev/null || true
+  fi
+  if rc-service easynode start; then
+    log "EasyNode 已启动: http://0.0.0.0:$EASYNODE_HTTP_PORT (初始账号密码见 /var/log/easynode.log)"
+  else
+    err "EasyNode 启动失败, 可通过 /var/log/easynode.log 查看"
+  fi
+else
+  log "EASYNODE_ENABLED=false, 跳过 EasyNode"
 fi
 
 # ---------- 3. 系统日志 (busybox syslogd, guan 菜单可查看) ----------
@@ -156,6 +199,7 @@ write_status() {
     echo "sshd : $(pgrep -f 'sshd.*[l]istener' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo "tunc : $(pgrep -f 'local/lib/tunc/tunc' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo "tunnel-token: $([ -s /etc/tunc/token ] && echo SET || echo NONE)"
+    echo "easynode: $(pgrep -f 'index[.]js' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo
     echo "== 网络出站探测 =="
     for hp in region1.v2.argotunnel.com:7844 api.cloudflare.com:443 www.cloudflare.com:443 github.com:443; do
@@ -170,6 +214,9 @@ write_status() {
     echo
     echo "== wssh.log (tail 15) =="
     tail -n 15 /var/log/wssh.log 2>/dev/null
+    echo
+    echo "== easynode.log (tail 15, 含初始账号密码) =="
+    tail -n 15 /var/log/easynode.log 2>/dev/null
     echo
     echo "== tunc.log (tail 40) =="
     tail -n 40 /var/log/tunc.log 2>/dev/null
@@ -187,11 +234,11 @@ FIRST_SSH_PORT=$(printf '%s' "$PORTS" | head -n 1)
 export WSSH_LOG=/var/log/wssh.log
 : > "$WSSH_LOG" 2>/dev/null || true
 start_wssh() {
-  python3 /usr/local/bin/wssh-server "$PORT" "$STATUS_DIR" 127.0.0.1 "$FIRST_SSH_PORT" >/dev/null 2>&1 &
+  python3 /usr/local/bin/wssh-server "$WSSH_BIND_PORT" "$STATUS_DIR" 127.0.0.1 "$FIRST_SSH_PORT" >/dev/null 2>&1 &
 }
 if command -v python3 >/dev/null 2>&1 && [ -x /usr/local/bin/wssh-server ]; then
   start_wssh
-  log "状态页 + SSH over WebSocket 桥已启动: 端口 $PORT (WS 路径 /ssh → 本机 sshd:$FIRST_SSH_PORT)"
+  log "状态页 + SSH over WebSocket 桥已启动: 端口 $WSSH_BIND_PORT (WS 路径 /ssh → 本机 sshd:$FIRST_SSH_PORT)"
 else
   warn "python3/wssh-server 不可用, 状态页与 WS 桥不可用"
 fi
@@ -215,6 +262,13 @@ fi
     if ! pgrep -f 'wssh-server' >/dev/null 2>&1; then
       start_wssh 2>/dev/null \
         && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 wssh-server" || true
+    fi
+    if [ "$(cat /run/.alpine-box-easynode-enabled 2>/dev/null)" = "true" ] \
+       && [ -f /etc/init.d/easynode ] \
+       && ! pgrep -f 'index[.]js' >/dev/null 2>&1; then
+      rc-service easynode stop >/dev/null 2>&1
+      rc-service easynode start >/dev/null 2>&1 \
+        && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 easynode" || true
     fi
   done
 ) &

@@ -26,7 +26,7 @@ jobs:
           mkdir -p /tmp/tkey
           ssh-keygen -q -t ed25519 -N '' -f /tmp/tkey/id_ed25519
           docker run -d --name alpine-box-test \
-            -p 127.0.0.1:2022:2022 -p 127.0.0.1:18000:3000 \
+            -p 127.0.0.1:2022:2022 -p 127.0.0.1:18000:3000 -p 127.0.0.1:18082:8082 \
             -e SSH_ENABLED=true -e SSH_PORT=2022 -e SHOW_LOG=true \
             -e SSH_PUBLIC_KEY="$(cat /tmp/tkey/id_ed25519.pub)" \
             alpine-box:test
@@ -76,7 +76,19 @@ jobs:
           echo "HTTP $CODE"
           cat /tmp/status.html | head -8
           grep -q 'sshd : RUNNING' /tmp/status.html || { echo STATUS_ASSERT_FAIL; exit 1; }
+          grep -q 'easynode: RUNNING' /tmp/status.html || { echo EASYNODE_ASSERT_FAIL; exit 1; }
           echo STATUS_PAGE_OK
+
+      - name: EasyNode 面板测试
+        run: |
+          for i in $(seq 1 15); do
+            CODE=$(curl -s -o /tmp/easynode.html -w '%{http_code}' http://127.0.0.1:18082/ || echo 000)
+            if [ "$CODE" = "200" ]; then break; fi
+            sleep 2
+          done
+          echo "HTTP $CODE, body bytes: $(wc -c < /tmp/easynode.html)"
+          [ "$CODE" = "200" ] || { echo EASYNODE_PANEL_FAIL; exit 1; }
+          echo EASYNODE_PANEL_OK
 
       - name: 容器日志
         if: always()
