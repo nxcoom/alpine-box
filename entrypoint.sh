@@ -168,6 +168,9 @@ write_status() {
     done
     echo "proxy-env: HTTP_PROXY=${HTTP_PROXY:-无} HTTPS_PROXY=${HTTPS_PROXY:-无} ALL_PROXY=${ALL_PROXY:-无}"
     echo
+    echo "== wssh.log (tail 15) =="
+    tail -n 15 /var/log/wssh.log 2>/dev/null
+    echo
     echo "== tunc.log (tail 40) =="
     tail -n 40 /var/log/tunc.log 2>/dev/null
     echo
@@ -181,6 +184,8 @@ write_status() {
 # WS 路径 /ssh 双向桥接到本机 sshd; 配合客户端 tools/wssh.py:
 #   ssh -o ProxyCommand="python3 wssh.py pipe --host <域名> --tls" root@<域名>
 FIRST_SSH_PORT=$(printf '%s' "$PORTS" | head -n 1)
+export WSSH_LOG=/var/log/wssh.log
+: > "$WSSH_LOG" 2>/dev/null || true
 start_wssh() {
   python3 /usr/local/bin/wssh-server "$PORT" "$STATUS_DIR" 127.0.0.1 "$FIRST_SSH_PORT" >/dev/null 2>&1 &
 }

@@ -36,9 +36,19 @@ CONTENT_TYPES = {
 }
 
 
+LOG_FILE = os.environ.get("WSSH_LOG", "")
+
+
 def log(msg):
-    sys.stderr.write("[wssh-server] %s\n" % msg)
+    line = "[wssh-server] %s\n" % msg
+    sys.stderr.write(line)
     sys.stderr.flush()
+    if LOG_FILE:
+        try:
+            with open(LOG_FILE, "a") as f:
+                f.write("%s %s" % (__import__("time").strftime("%FT%TZ", __import__("time").gmtime()), line))
+        except OSError:
+            pass
 
 
 def recv_exact(sock, n):
@@ -257,6 +267,7 @@ def handle_ws(sock, headers, thost, tport):
         return
     try:
         tcp = socket.create_connection((thost, tport), timeout=10)
+        log("已桥接到 %s:%s" % (thost, tport))
     except OSError as e:
         log("bridge target %s:%s 连接失败: %s" % (thost, tport, e))
         try:
@@ -291,8 +302,10 @@ def handle_conn(sock, webdir, thost, tport):
         return
     if "websocket" in headers.get("upgrade", "").lower():
         if path.split("?", 1)[0] != WS_PATH:
+            log("WS 请求路径错误: %s" % path)
             send_simple(sock, 404, "websocket only at %s" % WS_PATH)
         else:
+            log("WS 升级请求到达 (origin=%s)" % headers.get("origin", "-"))
             handle_ws(sock, headers, thost, tport)
         return
     if method in ("GET", "HEAD"):
