@@ -5,7 +5,7 @@ enabled=$(cat /run/.alpine-box-ssh-enabled 2>/dev/null || echo true)
 if [ "$enabled" = "true" ] && ! pgrep -f 'sshd.*[l]istener' >/dev/null 2>&1; then
   exit 1
 fi
-if [ -s /etc/tunc/token ] && ! pgrep -x tunc >/dev/null 2>&1; then
+if [ -s /etc/tunc/token ] && ! pgrep -f 'local/lib/tunc/tunc' >/dev/null 2>&1; then
   exit 1
 fi
 exit 0

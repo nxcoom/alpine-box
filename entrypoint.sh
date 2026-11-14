@@ -38,6 +38,10 @@ SSH_ENABLED=$(to_bool "$SSH_ENABLED")
 SHOW_LOG=$(to_bool "$SHOW_LOG")
 echo "$SSH_ENABLED" > /run/.alpine-box-ssh-enabled
 
+# cloudflared 边缘连接参数透传 (例如出口仅 IPv6 可用时: TUNNEL_EDGE_IP_VERSION=6)
+[ -n "${TUNNEL_EDGE_IP_VERSION:-}" ] && export TUNNEL_EDGE_IP_VERSION
+[ -n "${TUNNEL_TRANSPORT_PROTOCOL:-}" ] && export TUNNEL_TRANSPORT_PROTOCOL
+
 # ---------- OpenRC 容器内引导 ----------
 mkdir -p /run/openrc
 touch /run/openrc/softlevel
@@ -150,7 +154,7 @@ write_status() {
   {
     echo "alpine-box status @ $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo "sshd : $(pgrep -f 'sshd.*[l]istener' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
-    echo "tunc : $(pgrep -x tunc >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
+    echo "tunc : $(pgrep -f 'local/lib/tunc/tunc' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo "tunnel-token: $([ -s /etc/tunc/token ] && echo SET || echo NONE)"
     echo
     echo "== 网络出站探测 =="
@@ -189,7 +193,7 @@ fi
         && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 sshd" || true
     fi
     if [ -s /etc/tunc/token ] && [ -f /etc/init.d/tunc ] \
-       && ! pgrep -x tunc >/dev/null 2>&1; then
+       && ! pgrep -f 'local/lib/tunc/tunc' >/dev/null 2>&1; then
       # supervise-daemon 可能仍在但子进程已死, 先 stop 清理状态再拉起
       rc-service tunc stop >/dev/null 2>&1
       rc-service tunc start >/dev/null 2>&1 \
