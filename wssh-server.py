@@ -6,8 +6,15 @@
 #  用法: wssh-server <监听端口> <静态目录> <桥接目标host> <桥接目标port>
 #
 #  路由:
-#    /ssh  (WS Upgrade)  → 双向桥接到 <目标host:port> (通常是本机 sshd)
-#    其他 GET/HEAD       → 静态文件 (默认 index.html), 即 alpine-box 状态页
+#    /ssh                 (WS Upgrade) → 双向桥接到 <目标host:port> (本机 sshd)
+#    /wssh-poll/open      (POST)       → 轮询模式: 建立会话, 返回 sid
+#    /wssh-poll/<sid>/up  (POST)       → 轮询模式: 上行字节 (body → TCP)
+#    /wssh-poll/<sid>/down(GET)        → 轮询模式: 长轮询下行字节 (X-Down-Seq 返回新偏移)
+#    /wssh-poll/<sid>/close(POST)      → 轮询模式: 结束会话
+#    其他 GET/HEAD                     → 静态文件 (默认 index.html), 即状态页
+#
+#  WS 升级被平台代理拦截时 (如 deployzy), 客户端自动降级为轮询传输 —
+#  纯 request/response, 可穿透任何 HTTP 反代/CDN。
 #
 #  配合客户端 tools/wssh.py, 可经平台 HTTPS 路由 (如 deployzy) 访问容器 SSH:
 #    ssh -o ProxyCommand="python3 wssh.py pipe --host <域名> --tls" root@<域名>
@@ -15,9 +22,11 @@
 import base64
 import hashlib
 import os
+import secrets
 import socket
 import sys
 import threading
+import time
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 WS_PATH = "/ssh"
@@ -66,29 +75,32 @@ def recv_exact(sock, n):
 
 
 def read_request(sock):
-    """读取 HTTP 请求头, 返回 (method, path, headers dict)。"""
+    """读取 HTTP 请求头, 返回 (method, path, headers dict, 剩余字节)。
+
+    剩余字节 = 同一 TCP 段里 header 之后的数据 (可能是已到达的 body 一部分),
+    必须交给 read_body 消费, 不能丢弃。"""
     data = b""
     while b"\r\n\r\n" not in data:
         if len(data) > MAX_HEADER:
-            return None, None, None
+            return None, None, None, b""
         try:
             chunk = sock.recv(4096)
         except (OSError, socket.timeout):
-            return None, None, None
+            return None, None, None, b""
         if not chunk:
-            return None, None, None
+            return None, None, None, b""
         data += chunk
-    head, _, _rest = data.partition(b"\r\n\r\n")
+    head, _, rest = data.partition(b"\r\n\r\n")
     lines = head.decode("latin-1").split("\r\n")
     parts = lines[0].split()
     if len(parts) < 2:
-        return None, None, None
+        return None, None, None, b""
     headers = {}
     for line in lines[1:]:
         if ":" in line:
             k, _, v = line.partition(":")
             headers[k.strip().lower()] = v.strip()
-    return parts[0], parts[1], headers
+    return parts[0], parts[1], headers, rest
 
 
 def send_simple(sock, code, text, ctype="text/plain; charset=utf-8"):
@@ -289,45 +301,238 @@ def handle_ws(sock, headers, thost, tport):
         pass
 
 
+# ============================================================
+#  轮询传输 (plain HTTP): 供不支持 WebSocket 升级的反代/CDN 使用
+# ============================================================
+POLL_PREFIX = "/wssh-poll"
+POLL_MAX_BUF = 4 * 1024 * 1024   # 会话下行缓冲上限 (超过则丢弃最旧, 偏移前移)
+POLL_IDLE = 600                   # 会话空闲回收 (秒)
+POLL_WAIT = 20                    # down 长轮询最长等待 (秒)
+
+SESSIONS = {}
+SESS_LOCK = threading.Lock()
+
+
+class PollSession:
+    def __init__(self, thost, tport):
+        self.tcp = socket.create_connection((thost, tport), timeout=10)
+        self.down = bytearray()
+        self.down_start = 0          # down 缓冲丢弃后, 本段起始的全局偏移
+        self.cv = threading.Condition()
+        self.wlock = threading.Lock()
+        self.closed = False
+        self.last_active = time.time()
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        try:
+            while True:
+                chunk = self.tcp.recv(65536)
+                if not chunk:
+                    break
+                with self.cv:
+                    self.down += chunk
+                    if len(self.down) > POLL_MAX_BUF:
+                        drop = len(self.down) - POLL_MAX_BUF
+                        del self.down[:drop]
+                        self.down_start += drop
+                    self.cv.notify_all()
+        except OSError:
+            pass
+        finally:
+            self.closed = True
+            with self.cv:
+                self.cv.notify_all()
+
+    def up(self, data):
+        with self.wlock:
+            self.tcp.sendall(data)
+
+    def down_since(self, seq):
+        """等待并返回 seq 之后的字节 (长轮询); 会话已关闭且无新数据返回 None。"""
+        deadline = time.time() + POLL_WAIT
+        with self.cv:
+            while True:
+                end = self.down_start + len(self.down)
+                if seq < end:
+                    off = seq - self.down_start
+                    return bytes(self.down[off:])
+                if self.closed:
+                    return None
+                remain = deadline - time.time()
+                if remain <= 0:
+                    return b""
+                self.cv.wait(remain)
+
+    def active(self):
+        self.last_active = time.time()
+
+    def close(self):
+        self.closed = True
+        try:
+            self.tcp.close()
+        except OSError:
+            pass
+        with self.cv:
+            self.cv.notify_all()
+
+
+def read_body(sock, headers, rest=b""):
+    try:
+        ln = int(headers.get("content-length", "0"))
+    except ValueError:
+        ln = 0
+    if ln <= 0:
+        return b""
+    if ln > MAX_FRAME:
+        return None
+    buf = rest[:ln]
+    if len(buf) < ln:
+        more = recv_exact(sock, ln - len(buf))
+        if more is None:
+            return None
+        buf += more
+    return buf
+
+
+def send_response(sock, code, body=b"", extra_headers=None, ctype="application/octet-stream", keepalive=True):
+    """发送完整响应 (头部带精确 Content-Length + body 一次发出)。"""
+    reason = {200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed"}.get(code, "OK")
+    hdr = "HTTP/1.1 %d %s\r\n" % (code, reason)
+    if code != 101:
+        hdr += "Content-Type: %s\r\n" % ctype
+    for k, v in (extra_headers or []):
+        hdr += "%s: %s\r\n" % (k, v)
+    hdr += "Cache-Control: no-store\r\n"
+    hdr += "Content-Length: %d\r\n" % len(body)
+    hdr += "Connection: %s\r\n\r\n" % ("keep-alive" if keepalive else "close")
+    sock.sendall(hdr.encode() + body)
+
+
+def handle_poll(sock, method, path, headers, rest=b""):
+    """处理 /wssh-poll/... 路由。返回 True 表示已处理 (响应支持 keep-alive)。"""
+    if not path.startswith(POLL_PREFIX):
+        return False
+    base, _, query = path.partition("?")
+    params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+    parts = base[len(POLL_PREFIX):].strip("/").split("/")
+    try:
+        if parts == ["open"] and method == "POST":
+            read_body(sock, headers, rest)
+            sess = PollSession(THOST[0], THOST[1])
+            sid = secrets.token_hex(8)
+            with SESS_LOCK:
+                SESSIONS[sid] = sess
+            log("poll 会话建立: %s → %s:%s" % (sid, THOST[0], THOST[1]))
+            send_response(sock, 200, extra_headers=[("X-Sid", sid), ("X-Down-Seq", "0")])
+            return True
+        sid = parts[0] if parts else ""
+        with SESS_LOCK:
+            sess = SESSIONS.get(sid)
+        if sess is None:
+            send_response(sock, 404, b"session gone", ctype="text/plain")
+            return True
+        sess.active()
+        action = parts[1] if len(parts) > 1 else ""
+        if action == "up" and method == "POST":
+            data = read_body(sock, headers, rest)
+            if data:
+                sess.up(data)
+            send_response(sock, 200, b"OK", ctype="text/plain")
+            return True
+        if action == "down" and method == "GET":
+            try:
+                seq = int(params.get("seq", "0"))
+            except ValueError:
+                seq = 0
+            data = sess.down_since(seq)
+            if data is None:
+                send_response(sock, 200, extra_headers=[("X-Down-Seq", str(sess.down_start + len(sess.down)))])
+                return True
+            new_seq = sess.down_start + len(sess.down)
+            send_response(sock, 200, data, extra_headers=[("X-Down-Seq", str(new_seq))])
+            return True
+        if action == "close" and method == "POST":
+            read_body(sock, headers, rest)
+            sess.close()
+            with SESS_LOCK:
+                SESSIONS.pop(sid, None)
+            send_response(sock, 200, b"OK", ctype="text/plain")
+            return True
+        send_response(sock, 400, b"bad action", ctype="text/plain")
+        return True
+    except (OSError, ValueError) as e:
+        log("poll %s 错误: %s" % (path, e))
+        try:
+            send_response(sock, 400, b"error", ctype="text/plain", keepalive=False)
+        except OSError:
+            pass
+        return True
+
+
+def poll_gc():
+    while True:
+        time.sleep(30)
+        now = time.time()
+        with SESS_LOCK:
+            dead = [sid for sid, s in SESSIONS.items()
+                    if s.closed or now - s.last_active > POLL_IDLE]
+            for sid in dead:
+                SESSIONS.pop(sid, None).close()
+
+
+THOST = ("127.0.0.1", 22)  # 在 main() 中被覆盖
+
+
 def handle_conn(sock, webdir, thost, tport):
     try:
-        method, path, headers = read_request(sock)
-    except Exception:
-        return
-    if method is None:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except OSError:
+        pass
+    try:
+        while True:
+            method, path, headers, rest = read_request(sock)
+            if method is None:
+                break
+            if "websocket" in headers.get("upgrade", "").lower():
+                if path.split("?", 1)[0] != WS_PATH:
+                    log("WS 请求路径错误: %s" % path)
+                    send_simple(sock, 404, "websocket only at %s" % WS_PATH)
+                else:
+                    log("WS 升级请求到达 (origin=%s)" % headers.get("origin", "-"))
+                    handle_ws(sock, headers, thost, tport)
+                return  # 连接已被桥接接管
+            if path.startswith(POLL_PREFIX):
+                if handle_poll(sock, method, path, headers, rest):
+                    continue  # keep-alive, 继续读下一个请求
+                return
+            if method in ("GET", "HEAD"):
+                serve_static(sock, path, webdir)
+            else:
+                send_simple(sock, 405, "method not allowed")
+            break  # 静态响应后关闭
+    except Exception as e:
+        log("连接处理异常: %s" % e)
+    finally:
         try:
             sock.close()
         except OSError:
             pass
-        return
-    if "websocket" in headers.get("upgrade", "").lower():
-        if path.split("?", 1)[0] != WS_PATH:
-            log("WS 请求路径错误: %s" % path)
-            send_simple(sock, 404, "websocket only at %s" % WS_PATH)
-        else:
-            log("WS 升级请求到达 (origin=%s)" % headers.get("origin", "-"))
-            handle_ws(sock, headers, thost, tport)
-        return
-    if method in ("GET", "HEAD"):
-        serve_static(sock, path, webdir)
-    else:
-        send_simple(sock, 405, "method not allowed")
-    try:
-        sock.close()
-    except OSError:
-        pass
 
 
 def main():
+    global THOST
     if len(sys.argv) != 5:
         sys.stderr.write("用法: wssh-server <监听端口> <静态目录> <桥接host> <桥接端口>\n")
         sys.exit(2)
     port, webdir, thost, tport = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
+    THOST = (thost, tport)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", port))
     srv.listen(128)
     log("listening on 0.0.0.0:%d (static=%s, bridge=%s:%d)" % (port, webdir, thost, tport))
+    threading.Thread(target=poll_gc, daemon=True).start()
     while True:
         try:
             conn, _addr = srv.accept()

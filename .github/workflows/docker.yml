@@ -59,6 +59,13 @@ jobs:
             -o ProxyCommand="python3 tools/wssh.py pipe --host 127.0.0.1 --port 18000" \
             root@127.0.0.1 'echo WSSH_BRIDGE_OK; guan version'
 
+      - name: SSH over HTTP 轮询传输测试 (反代拦截 WS 时的降级路径)
+        run: |
+          ssh -i /tmp/tkey/id_ed25519 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 \
+            -o ProxyCommand="python3 tools/wssh.py pipe --host 127.0.0.1 --port 18000 --transport poll" \
+            root@127.0.0.1 'echo WSSH_POLL_OK'
+
       - name: 状态页测试
         run: |
           for i in $(seq 1 15); do
