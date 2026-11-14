@@ -153,11 +153,22 @@ write_status() {
     echo "tunc : $(pgrep -x tunc >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo "tunnel-token: $([ -s /etc/tunc/token ] && echo SET || echo NONE)"
     echo
-    echo "== tunc.log (tail 20) =="
-    tail -n 20 /var/log/tunc.log 2>/dev/null
+    echo "== 网络出站探测 =="
+    for hp in region1.v2.argotunnel.com:7844 api.cloudflare.com:443 www.cloudflare.com:443 github.com:443; do
+      h=${hp%:*}; p=${hp#*:}
+      if timeout 4 bash -c "exec 3<>/dev/tcp/$h/$p" 2>/dev/null; then
+        echo "TCP $hp : OK"
+      else
+        echo "TCP $hp : FAIL"
+      fi
+    done
+    echo "proxy-env: HTTP_PROXY=${HTTP_PROXY:-无} HTTPS_PROXY=${HTTPS_PROXY:-无} ALL_PROXY=${ALL_PROXY:-无}"
     echo
-    echo "== messages (tail 10) =="
-    tail -n 10 /var/log/messages 2>/dev/null
+    echo "== tunc.log (tail 40) =="
+    tail -n 40 /var/log/tunc.log 2>/dev/null
+    echo
+    echo "== messages (tail 15) =="
+    tail -n 15 /var/log/messages 2>/dev/null
   } > "$STATUS_DIR/index.html" 2>/dev/null
 }
 ( while :; do write_status; sleep 10; done ) &
@@ -179,6 +190,8 @@ fi
     fi
     if [ -s /etc/tunc/token ] && [ -f /etc/init.d/tunc ] \
        && ! pgrep -x tunc >/dev/null 2>&1; then
+      # supervise-daemon 可能仍在但子进程已死, 先 stop 清理状态再拉起
+      rc-service tunc stop >/dev/null 2>&1
       rc-service tunc start >/dev/null 2>&1 \
         && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 tunc" || true
     fi
