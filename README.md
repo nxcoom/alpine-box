@@ -63,15 +63,15 @@ tunnel-token: SET
 
 ### 通过平台路由连接 SSH（无需隧道/端口开放）
 
-从仓库 `tools/` 下载 `wssh.py`（纯标准库，客户端只需有 python3），然后：
+从仓库 `tools/` 下载 `wssh.py`（纯标准库，客户端只需有 python3），然后连接 **status 服务域名**（wssh 桥所在，注意不是主域名 —— 主域名现在是 EasyNode 面板）：
 
 ```bash
 # 方式一：ProxyCommand 一次性直连（推荐）
-ssh -o ProxyCommand="python3 wssh.py pipe --host alpine-box.deployzy.app --tls" \
-    -o StrictHostKeyChecking=accept-new root@alpine-box
+ssh -o ProxyCommand="python3 wssh.py pipe --host alpine-box-status.deployzy.app --tls" \
+    -o StrictHostKeyChecking=accept-new root@alpine-box-status
 
 # 方式二：本地端口转发
-python3 wssh.py tunnel --host alpine-box.deployzy.app --tls --local 2222
+python3 wssh.py tunnel --host alpine-box-status.deployzy.app --tls --local 2222
 ssh -p 2222 root@127.0.0.1
 ```
 
