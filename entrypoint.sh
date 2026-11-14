@@ -274,35 +274,50 @@ if [ "$EASYNODE_ENABLED" = "true" ]; then
       return 1
     }
     # 1. 凭据收敛循环: NeDB 是 append-replay 格式, 应用初始化分多段写入
-    #    (先 insert 随机用户 → 后生成 RSA 密钥再 $set 覆盖), 我们的写入可能被
+    #    (先 insert 随机用户 → 生成 RSA 密钥后再 $set 覆盖), 我们的写入可能被
     #    应用后续写入盖掉 → 每轮: 等应用就绪 → 校验 key.db 最终状态 → 不对就
-    #    停服补写 → 重启 → 重新校验 (补写永远在应用写入之后, 重放时最后者胜)
+    #    有界强杀 + 停服补写 + 重启 → 重新校验 (补写在应用写入之后, 重放最后者胜)
     ORCH_LOG=/var/log/easynode-orchestrator.log
     orch() { echo "$(date -u '+%FT%TZ') $*" >> "$ORCH_LOG"; }
-    orch "=== 编排开始"
     check_user() {
       ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs --check 2>>"$ORCH_LOG" ) | grep '^user=' | cut -d= -f2
     }
+    stop_easynode_bounded() {
+      # node 收到 SIGTERM 可能长时间不退出, rc-service stop 会随之阻塞 → 直接有界强杀
+      pkill -TERM -f 'index[.]js' 2>/dev/null || true
+      n=0
+      while [ $n -lt 8 ] && pgrep -f 'index[.]js' >/dev/null 2>&1; do sleep 1; n=$((n+1)); done
+      pgrep -f 'index[.]js' >/dev/null 2>&1 && pkill -KILL -f 'index[.]js' 2>/dev/null || true
+      sleep 1
+      timeout 15 rc-service easynode stop >/dev/null 2>&1 || true
+      # 进程已死但 openrc 状态残留时清理, 避免 start 被"已启动"挡住
+      if ! pgrep -f 'index[.]js' >/dev/null 2>&1 && [ -e /run/openrc/started/easynode ]; then
+        rm -f /run/openrc/started/easynode
+      fi
+      sleep 1
+    }
+    orch "=== 编排开始"
     if [ -n "${EASYNODE_ADMIN_USER:-}" ] && [ -n "${EASYNODE_ADMIN_PASSWORD:-}" ]; then
       touch /run/.alpine-box-easynode-paused   # 看门狗在编排期间不干预
       try=0; done_ok=""
       while [ $try -lt 4 ]; do
         if ! wait_http "$EASYNODE_HTTP_PORT"; then
-          orch "wait_http FAIL (尝试 $try)"; sleep 2; try=$((try+1)); continue
+          orch "round $try: wait_http FAIL"; sleep 2; try=$((try+1)); continue
         fi
         U=$(check_user)
         orch "round $try: key.db user=$U"
         [ "$U" = "$EASYNODE_ADMIN_USER" ] && { done_ok=true; break; }
-        rc-service easynode stop >/dev/null 2>&1
+        stop_easynode_bounded
         ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs >>"$ORCH_LOG" 2>&1 ) \
           || orch "patch 脚本报错 (尝试 $try)"
-        rc-service easynode start >/dev/null 2>&1
+        timeout 25 rc-service easynode start >/dev/null 2>&1 || true
         try=$((try+1))
       done
       rm -f /run/.alpine-box-easynode-paused
       if [ "$done_ok" = "true" ]; then
         log "EasyNode 管理员账号已按环境变量设置: $EASYNODE_ADMIN_USER"
       else
+        orch "凭据收敛失败"
         warn "EasyNode 凭据收敛失败 (详见 $ORCH_LOG), 随机密码见 /var/log/easynode.log"
       fi
     else
@@ -326,7 +341,7 @@ if [ "$EASYNODE_ENABLED" = "true" ]; then
           echo "-- easynode.log 尾部:"; tail -30 /var/log/easynode.log 2>/dev/null
         } >> /var/log/easynode-fallback.log 2>&1
         echo false > /run/.alpine-box-easynode-enabled
-        rc-service easynode stop >/dev/null 2>&1 || true
+        stop_easynode_bounded
         start_wssh "$PORT"
         printf '%b\n' "${YELLOW}[alpine-box]${NC} easynode 90s 未就绪, 状态页/SSH 桥已接管端口 $PORT (诊断: /var/log/easynode-fallback.log)"
       fi
