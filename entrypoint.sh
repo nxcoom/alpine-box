@@ -184,31 +184,6 @@ if [ "$EASYNODE_ENABLED" = "true" ] && [ -f /opt/easynode/index.js ]; then
   echo "export EASYNODE_HTTP_PORT='$EASYNODE_HTTP_PORT'" > /etc/conf.d/easynode
   if rc-service easynode start; then
     log "EasyNode 已启动: http://0.0.0.0:$EASYNODE_HTTP_PORT"
-    # 环境变量指定管理员账号 (幂等): 摆脱"初始密码只在日志里"的限制, 重部署后凭据稳定
-    if [ -n "${EASYNODE_ADMIN_USER:-}" ] && [ -n "${EASYNODE_ADMIN_PASSWORD:-}" ]; then
-      (
-        n=0
-        while [ $n -lt 30 ]; do
-          [ -s /opt/easynode/app/db/key.db ] && break
-          sleep 2; n=$((n+1))
-        done
-        ok=""
-        m=0
-        while [ $m -lt 3 ]; do
-          if ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs >>/var/log/easynode.log 2>&1 ); then
-            ok=true; break
-          fi
-          sleep 5; m=$((m+1))
-        done
-        if [ "$ok" = "true" ]; then
-          log "EasyNode 管理员账号已按环境变量设置: $EASYNODE_ADMIN_USER"
-        else
-          warn "EasyNode 凭据设置脚本失败, 详情见 /var/log/easynode.log"
-        fi
-      ) &
-    else
-      log "未设置 EASYNODE_ADMIN_USER/PASSWORD, 初始账号密码见 /var/log/easynode.log"
-    fi
   else
     err "EasyNode 启动失败, 可通过 /var/log/easynode.log 查看"
   fi
@@ -281,28 +256,56 @@ else
   warn "python3/wssh-server 不可用, 状态页与 WS 桥不可用"
 fi
 
-# ---------- 3.7 面板自检: easynode 已在平台路由端口启动, 60s 未就绪才回退 wssh ----------
-# 注意: 等待期间 wssh 绝不能占用 $PORT, 否则 node 就绪后会 EADDRINUSE 崩溃循环
-if [ "$WEB_PANEL_ON_PORT" = "easynode" ] && [ "$EASYNODE_ENABLED" = "true" ]; then
+# ---------- 3.7 EasyNode 编排: 凭据设置 (停服窗口写 NeDB) + 平台路由自检 ----------
+# NeDB 不能与运行中的应用并发写 (上游 reset-password.js 同样要求先停服):
+# 等应用首次启动生成 key.db → 停服 → 写入环境变量凭据 → 重启 → 自检/回退
+if [ "$EASYNODE_ENABLED" = "true" ]; then
   (
-    n=0; up=""
-    while [ $n -lt 30 ]; do
-      if curl -s -o /dev/null -m 3 "http://127.0.0.1:$PORT/"; then up=true; break; fi
-      sleep 2; n=$((n+1))
-    done
-    if [ "$up" = "true" ]; then
-      printf '%b\n' "${GREEN}[alpine-box]${NC} easynode 自检通过, 面板在端口 $PORT"
-    else
-      {
-        echo "== easynode 自检失败 @ $(date -u '+%FT%TZ') (端口 $PORT)"
-        echo "-- netstat:"; netstat -tln 2>/dev/null | head -20
-        echo "-- node 进程:"; pgrep -af node | head -5
-        echo "-- easynode.log 尾部:"; tail -30 /var/log/easynode.log 2>/dev/null
-      } >> /var/log/easynode-fallback.log 2>&1
-      echo false > /run/.alpine-box-easynode-enabled
-      rc-service easynode stop >/dev/null 2>&1 || true
-      start_wssh "$PORT"
-      printf '%b\n' "${YELLOW}[alpine-box]${NC} easynode 60s 未就绪, 状态页/SSH 桥已接管端口 $PORT (诊断: /var/log/easynode-fallback.log)"
+    # 1. 等待应用生成 key.db
+    n=0
+    while [ $n -lt 45 ] && ! [ -s /opt/easynode/app/db/key.db ]; do sleep 2; n=$((n+1)); done
+    # 2. 环境变量凭据: 停服 → 写入 → 重启 (重部署后凭据稳定, 不依赖日志里的随机密码)
+    if [ -s /opt/easynode/app/db/key.db ] && [ -n "${EASYNODE_ADMIN_USER:-}" ] && [ -n "${EASYNODE_ADMIN_PASSWORD:-}" ]; then
+      rc-service easynode stop >/dev/null 2>&1
+      ok=""
+      m=0
+      while [ $m -lt 3 ]; do
+        if ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs >>/var/log/easynode.log 2>&1 ); then
+          ok=true; break
+        fi
+        sleep 3; m=$((m+1))
+      done
+      rc-service easynode start >/dev/null 2>&1
+      if [ "$ok" = "true" ]; then
+        log "EasyNode 管理员账号已按环境变量设置: $EASYNODE_ADMIN_USER"
+      else
+        warn "EasyNode 凭据设置脚本失败, 详情见 /var/log/easynode.log"
+      fi
+    elif [ ! -s /opt/easynode/app/db/key.db ]; then
+      warn "EasyNode key.db 90s 未生成, 凭据沿用应用随机生成 (见 /var/log/easynode.log)"
+    fi
+    # 3. 平台路由自检: easynode 模式下面板必须应答, 90s 未就绪则回退 wssh
+    #    (等待期间 wssh 绝不能占用 $PORT, 否则 node 就绪后会 EADDRINUSE 崩溃循环)
+    if [ "$WEB_PANEL_ON_PORT" = "easynode" ]; then
+      n=0; up=""
+      while [ $n -lt 45 ]; do
+        if curl -s -o /dev/null -m 3 "http://127.0.0.1:$PORT/"; then up=true; break; fi
+        sleep 2; n=$((n+1))
+      done
+      if [ "$up" = "true" ]; then
+        printf '%b\n' "${GREEN}[alpine-box]${NC} easynode 自检通过, 面板在端口 $PORT"
+      else
+        {
+          echo "== easynode 自检失败 @ $(date -u '+%FT%TZ') (端口 $PORT)"
+          echo "-- netstat:"; netstat -tln 2>/dev/null | head -20
+          echo "-- node 进程:"; pgrep -af node | head -5
+          echo "-- easynode.log 尾部:"; tail -30 /var/log/easynode.log 2>/dev/null
+        } >> /var/log/easynode-fallback.log 2>&1
+        echo false > /run/.alpine-box-easynode-enabled
+        rc-service easynode stop >/dev/null 2>&1 || true
+        start_wssh "$PORT"
+        printf '%b\n' "${YELLOW}[alpine-box]${NC} easynode 90s 未就绪, 状态页/SSH 桥已接管端口 $PORT (诊断: /var/log/easynode-fallback.log)"
+      fi
     fi
   ) &
 fi

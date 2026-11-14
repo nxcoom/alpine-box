@@ -89,8 +89,15 @@ jobs:
           done
           echo "HTTP $CODE, body bytes: $(wc -c < /tmp/easynode.html)"
           [ "$CODE" = "200" ] || { echo EASYNODE_PANEL_FAIL; exit 1; }
-          # 环境变量凭据脚本幂等性 (entrypoint 已异步执行过一次, 此处应报 already set 且 exit 0)
-          docker exec alpine-box-test sh -c 'cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs'
+          # 等待环境变量凭据生效 (编排器会短暂停服写入, 只读检查不与其竞争)
+          CREDS_OK=""
+          for i in $(seq 1 30); do
+            U=$(docker exec alpine-box-test sh -c 'cd /opt/easynode && node scripts/alpine-set-creds.mjs --check' | grep '^user=' | cut -d= -f2)
+            if [ "$U" = "ci-admin" ]; then CREDS_OK=true; break; fi
+            sleep 3
+          done
+          echo "key.db user: ${U:-none}"
+          [ "$CREDS_OK" = "true" ] || { echo EASYNODE_CREDS_FAIL; exit 1; }
           echo EASYNODE_PANEL_OK
 
       - name: 容器日志

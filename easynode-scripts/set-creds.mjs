@@ -16,10 +16,11 @@ import path from 'node:path'
 import Datastore from '@seald-io/nedb'
 
 const DB_DIR = path.join(process.cwd(), 'app/db')
+const checkOnly = process.argv.includes('--check')
 const user = process.env.EASYNODE_ADMIN_USER || ''
 const password = process.env.EASYNODE_ADMIN_PASSWORD || ''
 
-if (!user || !password) {
+if (!checkOnly && (!user || !password)) {
   console.error('EASYNODE_ADMIN_USER / EASYNODE_ADMIN_PASSWORD 未设置')
   process.exit(2)
 }
@@ -39,6 +40,10 @@ if (!doc?._id) {
 }
 
 const pwdHash = crypto.createHash('sha1').update(password).digest('hex')
+if (checkOnly) {
+  console.log(`user=${doc.user}`)
+  process.exit(0)
+}
 if (doc.user === user && doc.pwd === pwdHash) {
   console.log('credentials already set')
   process.exit(0)
