@@ -245,6 +245,9 @@ write_status() {
     echo "== easynode.log (tail 15, 含初始账号密码) =="
     tail -n 15 /var/log/easynode.log 2>/dev/null
     echo
+    echo "== easynode-fallback.log =="
+    tail -n 30 /var/log/easynode-fallback.log 2>/dev/null
+    echo
     echo "== tunc.log (tail 40) =="
     tail -n 40 /var/log/tunc.log 2>/dev/null
     echo
@@ -261,13 +264,40 @@ FIRST_SSH_PORT=$(printf '%s' "$PORTS" | head -n 1)
 export WSSH_LOG=/var/log/wssh.log
 : > "$WSSH_LOG" 2>/dev/null || true
 start_wssh() {
-  python3 /usr/local/bin/wssh-server "$WSSH_BIND_PORT" "$STATUS_DIR" 127.0.0.1 "$FIRST_SSH_PORT" >/dev/null 2>&1 &
+  python3 /usr/local/bin/wssh-server "${1:-$WSSH_BIND_PORT}" "$STATUS_DIR" 127.0.0.1 "$FIRST_SSH_PORT" >/dev/null 2>&1 &
 }
 if command -v python3 >/dev/null 2>&1 && [ -x /usr/local/bin/wssh-server ]; then
-  start_wssh
-  log "状态页 + SSH over WebSocket 桥已启动: 端口 $WSSH_BIND_PORT (WS 路径 /ssh → 本机 sshd:$FIRST_SSH_PORT)"
+  # 平台路由被 EasyNode 占用时, wssh 先绑定备用端口, 由自检逻辑决定最终归属
+  if [ "$WEB_PANEL_ON_PORT" = "easynode" ]; then
+    start_wssh "$WSSH_BIND_PORT"
+    log "wssh 桥/状态页(备用)已启动: 端口 $WSSH_BIND_PORT"
+  else
+    start_wssh
+    log "状态页 + SSH over WebSocket 桥已启动: 端口 $WSSH_BIND_PORT (WS 路径 /ssh → 本机 sshd:$FIRST_SSH_PORT)"
+  fi
 else
   warn "python3/wssh-server 不可用, 状态页与 WS 桥不可用"
+fi
+
+# ---------- 3.7 面板自检: easynode 无响应时把平台路由让回给 wssh ----------
+if [ "$WEB_PANEL_ON_PORT" = "easynode" ] && [ "$EASYNODE_ENABLED" = "true" ]; then
+  (
+    sleep 8
+    if ! curl -s -o /dev/null -m 5 "http://127.0.0.1:$PORT/"; then
+      {
+        echo "== easynode 自检失败 @ $(date -u '+%FT%TZ') (端口 $PORT)"
+        echo "-- netstat:"; netstat -tln 2>/dev/null | head -20
+        echo "-- node 进程:"; pgrep -af node | head -5
+        echo "-- easynode.log 尾部:"; tail -30 /var/log/easynode.log 2>/dev/null
+      } >> /var/log/easynode-fallback.log 2>&1
+      echo false > /run/.alpine-box-easynode-enabled
+      rc-service easynode stop >/dev/null 2>&1 || true
+      start_wssh "$PORT"
+      printf '%b\n' "${YELLOW}[alpine-box]${NC} easynode 自检失败, 状态页/SSH 桥已接管端口 $PORT (诊断: /var/log/easynode-fallback.log)"
+    else
+      printf '%b\n' "${GREEN}[alpine-box]${NC} easynode 自检通过 (端口 $PORT)"
+    fi
+  ) &
 fi
 
 # ---------- 4. 看门狗: 每 30s 检查, 服务被杀后自动拉起 ----------
