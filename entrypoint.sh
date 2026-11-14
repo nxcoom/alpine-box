@@ -51,6 +51,8 @@ if [ "$WEB_PANEL_ON_PORT" = "easynode" ]; then
   WSSH_BIND_PORT=8080
   log "平台路由端口 $PORT → EasyNode 面板 (wssh 桥/状态页改到 8080)"
 fi
+# init.d start_pre 从环境读取 (openrc-run 子进程只继承 export 的变量)
+export EASYNODE_HTTP_PORT
 
 # cloudflared 边缘连接参数透传 (例如出口仅 IPv6 可用时: TUNNEL_EDGE_IP_VERSION=6)
 [ -n "${TUNNEL_EDGE_IP_VERSION:-}" ] && export TUNNEL_EDGE_IP_VERSION
