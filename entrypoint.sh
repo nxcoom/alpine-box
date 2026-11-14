@@ -180,6 +180,8 @@ if [ "$EASYNODE_ENABLED" = "true" ] && [ -f /opt/easynode/index.js ]; then
     chmod 755 /etc/init.d/easynode
     rc-update add easynode default 2>/dev/null || true
   fi
+  # OpenRC 不透传调用方环境变量, 端口经 conf.d 注入 (openrc-run 自动 source, init.d start_pre 引用)
+  echo "export EASYNODE_HTTP_PORT='$EASYNODE_HTTP_PORT'" > /etc/conf.d/easynode
   if rc-service easynode start; then
     log "EasyNode 已启动: http://0.0.0.0:$EASYNODE_HTTP_PORT"
     # 环境变量指定管理员账号 (幂等): 摆脱"初始密码只在日志里"的限制, 重部署后凭据稳定
