@@ -1,0 +1,94 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    name: 构建并冒烟测试
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建镜像
+        run: docker build -t alpine-box:test .
+
+      - name: 启动容器 (无 CF_TOKEN 场景)
+        run: |
+          mkdir -p /tmp/tkey
+          ssh-keygen -q -t ed25519 -N '' -f /tmp/tkey/id_ed25519
+          docker run -d --name alpine-box-test \
+            -e SSH_ENABLED=true -e SSH_PORT=2022 -e SHOW_LOG=true \
+            -e SSH_PUBLIC_KEY="$(cat /tmp/tkey/id_ed25519.pub)" \
+            alpine-box:test
+          for i in $(seq 1 20); do
+            if docker exec alpine-box-test sh -c 'pgrep -f "sshd.*[l]istener" >/dev/null 2>&1'; then
+              break
+            fi
+            sleep 2
+          done
+
+      - name: 验证 sshd / 三个工具
+        run: |
+          set -e
+          docker exec alpine-box-test sh -c 'pgrep -f "sshd.*[l]istener" >/dev/null && echo SSHD_RUNNING'
+          docker exec alpine-box-test sh -c 'tunc version && echo TUNC_OK'
+          docker exec alpine-box-test sh -c 'guan version && echo GUAN_OK'
+          docker exec alpine-box-test sh -c 'sshx --help >/dev/null && echo SSHX_OK'
+          docker exec alpine-box-test sh -c '! pgrep -x tunc && echo TUNC_SKIPPED_OK'
+
+      - name: 真实 SSH 登录测试
+        run: |
+          ssh -i /tmp/tkey/id_ed25519 -p 2022 \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+            root@127.0.0.1 'echo SSH_LOGIN_OK; guan version; tunc status | head -8'
+
+      - name: 容器日志
+        if: always()
+        run: docker logs alpine-box-test 2>&1 | tail -40
+
+  build-push:
+    name: 构建多架构镜像并发布 GHCR
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

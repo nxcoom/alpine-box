@@ -1,0 +1,11 @@
+#!/bin/sh
+# alpine-box 容器健康检查
+# SSH 未启用时跳过 sshd 检查; tunc 进程由 supervise-daemon 自行保活
+enabled=$(cat /run/.alpine-box-ssh-enabled 2>/dev/null || echo true)
+if [ "$enabled" = "true" ] && ! pgrep -f 'sshd.*[l]istener' >/dev/null 2>&1; then
+  exit 1
+fi
+if [ -s /etc/tunc/token ] && ! pgrep -x tunc >/dev/null 2>&1; then
+  exit 1
+fi
+exit 0
