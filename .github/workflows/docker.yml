@@ -54,11 +54,15 @@ jobs:
 
       - name: 状态页测试
         run: |
-          for i in $(seq 1 10); do
-            if curl -sf http://127.0.0.1:18000/ | grep -q 'sshd : RUNNING'; then break; fi
+          for i in $(seq 1 15); do
+            CODE=$(curl -s -o /tmp/status.html -w '%{http_code}' http://127.0.0.1:18000/ || echo 000)
+            if [ "$CODE" = "200" ]; then break; fi
             sleep 2
           done
-          curl -sf http://127.0.0.1:18000/ | head -8
+          echo "HTTP $CODE"
+          cat /tmp/status.html | head -8
+          grep -q 'sshd : RUNNING' /tmp/status.html || { echo STATUS_ASSERT_FAIL; exit 1; }
+          echo STATUS_PAGE_OK
 
       - name: 容器日志
         if: always()

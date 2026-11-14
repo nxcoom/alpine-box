@@ -14,7 +14,7 @@ ENV SSH_ENABLED=true \
     SHOW_LOG=true \
     TZ=UTC
 
-RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata
+RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata busybox-extras
 
 COPY scripts/ /opt/scripts/
 COPY entrypoint.sh /entrypoint.sh

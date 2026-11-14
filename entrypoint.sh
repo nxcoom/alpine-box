@@ -161,8 +161,12 @@ write_status() {
   } > "$STATUS_DIR/index.html" 2>/dev/null
 }
 ( while :; do write_status; sleep 10; done ) &
-httpd -f -p "$PORT" -h "$STATUS_DIR" 2>/dev/null &
-log "状态页已启动: 端口 $PORT (/var/www/status)"
+if command -v httpd >/dev/null 2>&1; then
+  httpd -f -p "$PORT" -h "$STATUS_DIR" 2>/dev/null &
+  log "状态页已启动: 端口 $PORT (/var/www/status)"
+else
+  warn "未找到 httpd (busybox-extras), 状态页不可用"
+fi
 
 # ---------- 4. 看门狗: 每 30s 检查, 服务被杀后自动拉起 ----------
 (
