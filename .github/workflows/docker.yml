@@ -73,9 +73,21 @@ jobs:
           mkdir -p /tmp/wt && tar xzf /tmp/wt.tar.gz -C /tmp/wt
           /tmp/wt/wstunnel client ws://127.0.0.1:18090 -L tcp://127.0.0.1:18081:127.0.0.1:2022 > /tmp/wt-c.log 2>&1 &
           sleep 4
-          B=$(timeout 8 bash -c 'exec 3<>/dev/tcp/127.0.0.1/18081; head -c 20 <&3' 2>/dev/null | head -c 20)
+          B=""
+          for i in $(seq 1 10); do
+            B=$(timeout 8 bash -c 'exec 3<>/dev/tcp/127.0.0.1/18081; head -c 20 <&3' 2>/dev/null | head -c 20)
+            [[ "$B" == SSH-2.0* ]] && break
+            sleep 2
+          done
           echo "banner: ${B:-无}"
-          [[ "$B" == SSH-2.0* ]] || { echo WSTUNNEL_FAIL; exit 1; }
+          if [[ "$B" != SSH-2.0* ]]; then
+            echo "=== 客户端日志:"; cat /tmp/wt-c.log
+            echo "=== 容器 wstunnel.log:"; docker exec alpine-box-test sh -c 'cat /var/log/wstunnel.log 2>/dev/null | tail -15'
+            echo "=== 容器端口:"; docker exec alpine-box-test sh -c 'netstat -tln 2>/dev/null | head -12'
+            echo "=== 容器进程:"; docker exec alpine-box-test sh -c 'pgrep -af wstunnel'
+            echo WSTUNNEL_FAIL
+            exit 1
+          fi
           echo WSTUNNEL_OK
 
       - name: 状态页测试
