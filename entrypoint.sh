@@ -273,36 +273,40 @@ if [ "$EASYNODE_ENABLED" = "true" ]; then
       done
       return 1
     }
-    # 1. 等应用完全启动 (HTTP 应答 = key.db 已写入完整记录含 RSA 密钥)
+    # 1. 凭据收敛循环: NeDB 是 append-replay 格式, 应用初始化分多段写入
+    #    (先 insert 随机用户 → 后生成 RSA 密钥再 $set 覆盖), 我们的写入可能被
+    #    应用后续写入盖掉 → 每轮: 等应用就绪 → 校验 key.db 最终状态 → 不对就
+    #    停服补写 → 重启 → 重新校验 (补写永远在应用写入之后, 重放时最后者胜)
     ORCH_LOG=/var/log/easynode-orchestrator.log
     orch() { echo "$(date -u '+%FT%TZ') $*" >> "$ORCH_LOG"; }
     orch "=== 编排开始"
-    if wait_http "$EASYNODE_HTTP_PORT" \
-       && [ -n "${EASYNODE_ADMIN_USER:-}" ] && [ -n "${EASYNODE_ADMIN_PASSWORD:-}" ]; then
-      # 2. 停服 → 写凭据 → 重启 (应用检测到已有账号记录, 不会重新生成随机密码)
-      #    暂停标记: 防止看门狗在停服窗口内把应用拉起 (与写入过程竞争)
-      touch /run/.alpine-box-easynode-paused
-      orch "wait_http ok, 停服写入凭据"
-      rc-service easynode stop >/dev/null 2>&1
-      ok=""
-      m=0
-      while [ $m -lt 3 ]; do
-        if ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs >>"$ORCH_LOG" 2>&1 ); then
-          ok=true; break
+    check_user() {
+      ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs --check 2>>"$ORCH_LOG" ) | grep '^user=' | cut -d= -f2
+    }
+    if [ -n "${EASYNODE_ADMIN_USER:-}" ] && [ -n "${EASYNODE_ADMIN_PASSWORD:-}" ]; then
+      touch /run/.alpine-box-easynode-paused   # 看门狗在编排期间不干预
+      try=0; done_ok=""
+      while [ $try -lt 4 ]; do
+        if ! wait_http "$EASYNODE_HTTP_PORT"; then
+          orch "wait_http FAIL (尝试 $try)"; sleep 2; try=$((try+1)); continue
         fi
-        sleep 3; m=$((m+1))
+        U=$(check_user)
+        orch "round $try: key.db user=$U"
+        [ "$U" = "$EASYNODE_ADMIN_USER" ] && { done_ok=true; break; }
+        rc-service easynode stop >/dev/null 2>&1
+        ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs >>"$ORCH_LOG" 2>&1 ) \
+          || orch "patch 脚本报错 (尝试 $try)"
+        rc-service easynode start >/dev/null 2>&1
+        try=$((try+1))
       done
-      rc-service easynode start >/dev/null 2>&1
       rm -f /run/.alpine-box-easynode-paused
-      orch "重启完成 (patch ok=$ok)"
-      if [ "$ok" = "true" ]; then
+      if [ "$done_ok" = "true" ]; then
         log "EasyNode 管理员账号已按环境变量设置: $EASYNODE_ADMIN_USER"
       else
-        warn "EasyNode 凭据设置脚本失败, 详情见 $ORCH_LOG"
+        warn "EasyNode 凭据收敛失败 (详见 $ORCH_LOG), 随机密码见 /var/log/easynode.log"
       fi
-    elif ! curl -s -o /dev/null -m 3 "http://127.0.0.1:$EASYNODE_HTTP_PORT/"; then
-      orch "wait_http FAIL (90s), 跳过凭据设置"
-      warn "EasyNode 90s 未在 $EASYNODE_HTTP_PORT 就绪, 跳过凭据设置 (随机密码见 /var/log/easynode.log)"
+    else
+      orch "未设置 EASYNODE_ADMIN_USER/PASSWORD, 凭据沿用应用随机生成"
     fi
     # 3. 平台路由自检: easynode 模式下面板必须应答, 未就绪则回退 wssh
     #    (等待期间 wssh 绝不能占用 $PORT, 否则 node 就绪后会 EADDRINUSE 崩溃循环)
