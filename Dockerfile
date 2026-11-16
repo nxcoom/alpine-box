@@ -19,6 +19,16 @@ ENV SSH_ENABLED=true \
 
 RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata python3 iputils
 
+# 构建 chroot() no-op 预加载库: 部分容器平台 (Orkestr / rootless Podman / 收紧的 k8s)
+# 丢弃 CAP_SYS_CHROOT, 导致 OpenSSH 9.8+ 的 sshd-auth 在 preauth 阶段
+# chroot("/var/empty") 失败, 表现为 sshd 在跑但任何密码/公钥都登录不了。
+# 为匹配 musl 运行时, 在 node:22-alpine 构建阶段内用 apk 装 gcc 编译。
+RUN apk add --no-cache --virtual .build-deps gcc musl-dev
+COPY chroot-noop.c /chroot-noop.c
+RUN gcc -shared -fPIC -Os -o /usr/local/lib/chroot-noop.so /chroot-noop.c \
+ && apk del .build-deps \
+ && rm -f /chroot-noop.c
+
 # wstunnel 服务端 (v11.1.0, 与客户端协议版本一致; --restrict-to 限制隧道目标)
 ARG TARGETARCH
 RUN case "$TARGETARCH" in \

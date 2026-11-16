@@ -129,6 +129,21 @@ if [ -n "$SSH_PUBLIC_KEY" ]; then
 fi
 chmod 600 /root/.ssh/authorized_keys
 
+# 部分容器平台 (Orkestr / rootless Podman / 收紧的 k8s) 丢弃 CAP_SYS_CHROOT,
+# OpenSSH 9.8+ 的 sshd-auth 在 preauth 阶段 chroot("/var/empty") 会 fatal,
+# 表现为 sshd 在监听但任何密钥都登录不了。注入 chroot() no-op 预加载库规避。
+# OpenRC 不透传调用方环境变量, 必须经 /etc/conf.d/sshd 注入 (见 [[alpine-box]] 历史坑)。
+SSH_CONF_D=/etc/conf.d/sshd
+mkdir -p /etc/conf.d
+if [ -f /usr/local/lib/chroot-noop.so ]; then
+  # 去掉旧注入 (容器重建/重复执行时保持幂等), 保留其它自定义配置
+  grep -v 'LD_PRELOAD=.*chroot-noop' "$SSH_CONF_D" > "$SSH_CONF_D.tmp" 2>/dev/null \
+    || : > "$SSH_CONF_D.tmp"
+  mv "$SSH_CONF_D.tmp" "$SSH_CONF_D"
+  printf "export LD_PRELOAD='/usr/local/lib/chroot-noop.so'\n" >> "$SSH_CONF_D"
+  log "sshd 启用 chroot-noop 兼容层 (适配无 CAP_SYS_CHROOT 的容器平台)"
+fi
+
 if [ "$SSH_ENABLED" = "true" ]; then
   if sshd -t 2>/dev/null; then
     rc-update add sshd default 2>/dev/null || true
