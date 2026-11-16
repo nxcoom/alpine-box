@@ -14,7 +14,7 @@ Alpine 系统镜像，集成三个运维工具，可直接部署到 [deployzy](h
 
 1. 容器内引导 OpenRC（`/run/openrc/softlevel`），sshd 与 tunc 均以标准 OpenRC 服务运行，`guan` 菜单可直接启停/重启；
 2. 按环境变量生成 `sshd_config`、写入公钥、生成主机密钥（优先存放在 `FILE_PATH` 持久化，保持主机指纹稳定）；
-2.1. 经 `/etc/conf.d/sshd` 给 sshd 注入 `chroot()` no-op 预加载库（`LD_PRELOAD=/usr/local/lib/chroot-noop.so`），兼容丢弃 `CAP_SYS_CHROOT` 的容器平台（见下方说明）；
+2.1. 经 `/etc/conf.d/sshd` 给 sshd 注入特权分离兼容库（`LD_PRELOAD=/usr/local/lib/chroot-noop.so`），兼容丢弃 `CAP_SYS_CHROOT`/`CAP_SETGID`/`CAP_SETUID` 等 capability 的容器平台（见下方说明）；
 3. `CF_TOKEN` 写入 `/etc/tunc/token` 并启动 Cloudflare Tunnel；
 4. 看门狗每 30s 检查，服务被杀后自动拉起；`SHOW_LOG=true` 时容器 stdout 实时输出 tunc 与系统日志。
 
@@ -139,15 +139,15 @@ sshx        # SSH 配置菜单
 
 推送 `main` 分支或打 `v*` 标签后，GitHub Actions 自动构建 `linux/amd64` + `linux/arm64` 双架构镜像并发布到 GHCR（先跑冒烟测试：真实 SSH 登录验证 + 三个工具可用性检查）。
 
-冒烟测试用 `--cap-drop=SYS_CHROOT` 启动容器，复现 Orkestr / rootless Podman 等平台丢弃该 capability 的场景，确保 SSH 登录在这些平台上仍然可用（`chroot-noop.so` 生效）。
+冒烟测试用 `--cap-drop=SYS_CHROOT --cap-drop=SETGID --cap-drop=SETUID` 启动容器，复现 Orkestr / rootless Podman 等平台丢弃这些 capability 的场景，确保 SSH 登录在受限平台上仍然可用（兼容库生效）。
 
 手动触发：Actions → build → Run workflow。
 
 ## 故障排查
 
-**sshd 显示 RUNNING 但任何密钥/密码都登录不了，日志报 `fatal: chroot("/var/empty"): Operation not permitted [preauth]`**
+**sshd 显示 RUNNING 但任何密钥/密码都登录不了，日志报 `fatal: chroot("/var/empty"): Operation not permitted [preauth]` 或 `fatal: setgroups: Operation not permitted [preauth]`**
 
-这是容器平台丢弃 `CAP_SYS_CHROOT` 导致 OpenSSH 9.8+ 的 preauth `chroot("/var/empty")` 失败。本镜像已内置 `chroot-noop.so` 并经 `/etc/conf.d/sshd` 自动为 sshd 注入。若仍出现，检查：
+这是容器平台丢弃 `CAP_SYS_CHROOT` / `CAP_SETGID` / `CAP_SETUID` 导致 OpenSSH 9.8+ 的 preauth 特权分离（chroot + 降权）失败。本镜像已内置兼容库 `chroot-noop.so` 并经 `/etc/conf.d/sshd` 自动为 sshd 注入（capability 完整时该库不干预）。若仍出现，检查：
 
 - 容器内 `/usr/local/lib/chroot-noop.so` 存在、`/etc/conf.d/sshd` 含 `LD_PRELOAD=...chroot-noop.so`；
 - 若手动以非 OpenRC 方式启动 sshd（如 `sshd -D`），需自行设置 `LD_PRELOAD=/usr/local/lib/chroot-noop.so`（OpenRC 服务已自动处理）。

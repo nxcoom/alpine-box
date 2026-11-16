@@ -26,7 +26,7 @@ jobs:
           mkdir -p /tmp/tkey
           ssh-keygen -q -t ed25519 -N '' -f /tmp/tkey/id_ed25519
           docker run -d --name alpine-box-test \
-            --cap-drop=SYS_CHROOT \
+            --cap-drop=SYS_CHROOT --cap-drop=SETGID --cap-drop=SETUID \
             -p 127.0.0.1:2022:2022 -p 127.0.0.1:18000:3000 -p 127.0.0.1:18082:8082 -p 127.0.0.1:18090:8090 \
             -e SSH_ENABLED=true -e SSH_PORT=2022 -e SHOW_LOG=true \
             -e EASYNODE_ADMIN_USER=ci-admin -e EASYNODE_ADMIN_PASSWORD=ci-test-password-2026 \

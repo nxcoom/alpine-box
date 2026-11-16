@@ -19,13 +19,14 @@ ENV SSH_ENABLED=true \
 
 RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata python3 iputils
 
-# 构建 chroot() no-op 预加载库: 部分容器平台 (Orkestr / rootless Podman / 收紧的 k8s)
-# 丢弃 CAP_SYS_CHROOT, 导致 OpenSSH 9.8+ 的 sshd-auth 在 preauth 阶段
-# chroot("/var/empty") 失败, 表现为 sshd 在跑但任何密码/公钥都登录不了。
+# 构建 sshd 特权分离兼容库: 部分容器平台 (Orkestr / rootless Podman / 收紧的 k8s)
+# 丢弃 CAP_SYS_CHROOT / CAP_SETGID / CAP_SETUID, 导致 OpenSSH 9.8+ 的 sshd-auth
+# 在 preauth 阶段 chroot/setgroups/setresuid 失败 —— sshd 在跑但任何密钥都登录不了。
+# chroot-noop.so 将这些失败降级, 兼容受限平台 (capability 完整时行为不变)。
 # 为匹配 musl 运行时, 在 node:22-alpine 构建阶段内用 apk 装 gcc 编译。
 RUN apk add --no-cache --virtual .build-deps gcc musl-dev
 COPY chroot-noop.c /chroot-noop.c
-RUN gcc -shared -fPIC -Os -o /usr/local/lib/chroot-noop.so /chroot-noop.c \
+RUN gcc -shared -fPIC -Os -o /usr/local/lib/chroot-noop.so /chroot-noop.c -ldl \
  && apk del .build-deps \
  && rm -f /chroot-noop.c
 
