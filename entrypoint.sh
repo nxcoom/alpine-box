@@ -172,6 +172,9 @@ fi
 CONF_D_TUNC=/etc/conf.d/tunc
 [ -n "${TUNNEL_TRANSPORT_PROTOCOL:-}" ] && echo "export TUNNEL_TRANSPORT_PROTOCOL='$TUNNEL_TRANSPORT_PROTOCOL'" >> "$CONF_D_TUNC"
 [ -n "${TUNNEL_EDGE_IP_VERSION:-}" ] && echo "export TUNNEL_EDGE_IP_VERSION='$TUNNEL_EDGE_IP_VERSION'" >> "$CONF_D_TUNC"
+# 限制 Go runtime 线程数: 容器 pids 上限低 (Orkestr 256), cloudflared 默认按宿主
+# 机 CPU 核数起线程会撑爆 PID 表, 导致 SSH 会话 fork 失败。限制为 2 足够跑隧道。
+echo 'export GOMAXPROCS=2' >> "$CONF_D_TUNC"
 [ -f "$CONF_D_TUNC" ] && log "tunc conf.d: $(cat "$CONF_D_TUNC" | tr '\n' '; ')"
 if [ -n "$CF_TOKEN" ]; then
   mkdir -p /etc/tunc
@@ -221,6 +224,7 @@ if [ "$WSTUNNEL_ENABLED" = "true" ] && [ -x /usr/local/bin/wstunnel ] && [ -f /u
   {
     echo "export WSTUNNEL_PORT='$WSTUNNEL_PORT'"
     echo "export WSTUNNEL_RESTRICT_TO='$WSTUNNEL_RESTRICT_TO'"
+    echo 'export GOMAXPROCS=2'
   } > /etc/conf.d/wstunnel
   if rc-service wstunnel start; then
     log "wstunnel 服务端已启动: ws://0.0.0.0:$WSTUNNEL_PORT (仅允许隧道到 $WSTUNNEL_RESTRICT_TO)"

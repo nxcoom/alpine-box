@@ -152,6 +152,10 @@ sshx        # SSH 配置菜单
 - 容器内 `/usr/local/lib/chroot-noop.so` 存在、`/etc/conf.d/sshd` 含 `LD_PRELOAD=...chroot-noop.so`；
 - 若手动以非 OpenRC 方式启动 sshd（如 `sshd -D`），需自行设置 `LD_PRELOAD=/usr/local/lib/chroot-noop.so`（OpenRC 服务已自动处理）。
 
+**SSH 认证成功（`Accepted publickey`）但随后报 `fork: Resource temporarily unavailable` / shell 起不来**
+
+这是容器进程数（PID）被打满（平台硬限，Orkestr 为 256），不是 SSH 配置问题。镜像用 `tini`（`-g`）作 PID 1 回收僵尸进程，并给两个 Go 服务（cloudflared/tunc、wstunnel）注入 `GOMAXPROCS=2` 限制线程数，避免渐进式耗尽 PID。可用平台 stats 的 `pids` 字段观察。若仍打满，考虑关闭非必需的常驻服务（如 `WSTUNNEL_ENABLED=false`）。
+
 ## 脚本来源
 
 三个脚本为原版整合（与线上分发版本一致）：

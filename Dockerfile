@@ -17,7 +17,7 @@ ENV SSH_ENABLED=true \
     SHOW_LOG=true \
     TZ=UTC
 
-RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata python3 iputils
+RUN apk add --no-cache bash curl wget openssh openrc ca-certificates tzdata python3 iputils tini
 
 # 构建 sshd 特权分离兼容库: 部分容器平台 (Orkestr / rootless Podman / 收紧的 k8s)
 # 丢弃 CAP_SYS_CHROOT / CAP_SETGID / CAP_SETUID, 导致 OpenSSH 9.8+ 的 sshd-auth
@@ -78,4 +78,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s CMD /usr/local/bin/h
 # 8090: wstunnel server (websocket 隧道, --restrict-to 127.0.0.1:2022)
 EXPOSE 3000 8082 8090
 
-ENTRYPOINT ["/entrypoint.sh"]
+# tini 作为 PID 1 回收僵尸进程: 容器里 entrypoint fork 的各后台服务 (sshd 会话、
+# 看门狗、EasyNode 重启) 若父进程不 wait 会累积僵尸, 占满平台 pids 上限 (256)
+# 后导致 fork: Resource temporarily unavailable (SSH 认证过了但 shell 起不来)。
+ENTRYPOINT ["/sbin/tini", "-g", "--", "/entrypoint.sh"]
