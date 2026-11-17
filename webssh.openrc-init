@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+description="web_ssh panel (Go static binary, casualty01/web_ssh)"
+
+supervisor=supervise-daemon
+command="/usr/local/bin/webssh"
+directory="/opt/webssh"
+output_log="/var/log/webssh.log"
+error_log="/var/log/webssh.log"
+
+depend() {
+    need net
+}
+
+start_pre() {
+    # 所有配置经 /etc/conf.d/webssh 注入 (OpenRC 不透传调用方环境变量)。
+    # LISTEN_ADDR 由 entrypoint 写为 :$PORT; DATA_DIR/WEB_DIR 固定。
+    : "${DATA_DIR:=/var/lib/alpine-box/webssh}"
+    : "${WEB_DIR:=/opt/webssh/web}"
+    : "${LISTEN_ADDR:=:3000}"
+    : "${ADMIN_USER:=admin}"
+    : "${ADMIN_PASSWORD:=admin}"
+    export DATA_DIR WEB_DIR LISTEN_ADDR ADMIN_USER ADMIN_PASSWORD
+    checkpath --directory --mode 0755 "$DATA_DIR"
+}

@@ -27,9 +27,9 @@ jobs:
           ssh-keygen -q -t ed25519 -N '' -f /tmp/tkey/id_ed25519
           docker run -d --name alpine-box-test \
             --cap-drop=SYS_CHROOT --cap-drop=SETGID --cap-drop=SETUID \
-            -p 127.0.0.1:2022:2022 -p 127.0.0.1:18000:3000 -p 127.0.0.1:18082:8082 -p 127.0.0.1:18090:8090 \
+            -p 127.0.0.1:2022:2022 -p 127.0.0.1:18000:3000 -p 127.0.0.1:18080:8080 -p 127.0.0.1:18090:8090 \
             -e SSH_ENABLED=true -e SSH_PORT=2022 -e SHOW_LOG=true \
-            -e EASYNODE_ADMIN_USER=ci-admin -e EASYNODE_ADMIN_PASSWORD=ci-test-password-2026 \
+            -e ADMIN_USER=ci-admin -e ADMIN_PASSWORD=ci-test-password-2026 \
             -e SSH_PUBLIC_KEY="$(cat /tmp/tkey/id_ed25519.pub)" \
             alpine-box:test
           for i in $(seq 1 20); do
@@ -58,14 +58,14 @@ jobs:
         run: |
           ssh -i /tmp/tkey/id_ed25519 \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 \
-            -o ProxyCommand="python3 tools/wssh.py pipe --host 127.0.0.1 --port 18000" \
+            -o ProxyCommand="python3 tools/wssh.py pipe --host 127.0.0.1 --port 18080" \
             root@127.0.0.1 'echo WSSH_BRIDGE_OK; guan version'
 
       - name: SSH over HTTP 轮询传输测试 (反代拦截 WS 时的降级路径)
         run: |
           ssh -i /tmp/tkey/id_ed25519 \
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 \
-            -o ProxyCommand="python3 tools/wssh.py pipe --host 127.0.0.1 --port 18000 --transport poll" \
+            -o ProxyCommand="python3 tools/wssh.py pipe --host 127.0.0.1 --port 18080 --transport poll" \
             root@127.0.0.1 'echo WSSH_POLL_OK'
 
       - name: wstunnel 隧道测试 (客户端 → 服务端 → sshd)
@@ -94,46 +94,39 @@ jobs:
       - name: 状态页测试
         run: |
           for i in $(seq 1 15); do
-            CODE=$(curl -s -o /tmp/status.html -w '%{http_code}' http://127.0.0.1:18000/ || echo 000)
+            CODE=$(curl -s -o /tmp/status.html -w '%{http_code}' http://127.0.0.1:18080/ || echo 000)
             if [ "$CODE" = "200" ]; then break; fi
             sleep 2
           done
           echo "HTTP $CODE"
           cat /tmp/status.html | head -8
           grep -q 'sshd : RUNNING' /tmp/status.html || { echo STATUS_ASSERT_FAIL; exit 1; }
-          grep -q 'easynode: RUNNING' /tmp/status.html || { echo EASYNODE_ASSERT_FAIL; exit 1; }
+          grep -q 'webssh : RUNNING' /tmp/status.html || { echo WEBSSH_ASSERT_FAIL; exit 1; }
           echo STATUS_PAGE_OK
 
-      - name: EasyNode 面板测试
+      - name: web_ssh 面板测试 (登录 + 预置本机会话)
         run: |
           for i in $(seq 1 30); do
-            CODE=$(curl -s -o /tmp/easynode.html -w '%{http_code}' http://127.0.0.1:18082/ || echo 000)
+            CODE=$(curl -s -o /tmp/webssh.html -w '%{http_code}' http://127.0.0.1:18000/ || echo 000)
             if [ "$CODE" = "200" ]; then break; fi
             sleep 2
           done
-          echo "HTTP $CODE, body bytes: $(wc -c < /tmp/easynode.html)"
-          [ "$CODE" = "200" ] || { echo EASYNODE_PANEL_FAIL; exit 1; }
-          # 等待环境变量凭据生效 (编排器会短暂停服写入, 只读检查不与其竞争)
-          CREDS_OK=""
-          for i in $(seq 1 30); do
-            U=$(docker exec alpine-box-test sh -c 'cd /opt/easynode && node scripts/alpine-set-creds.mjs --check' | grep '^user=' | cut -d= -f2)
-            if [ "$U" = "ci-admin" ]; then CREDS_OK=true; break; fi
-            sleep 3
-          done
-          echo "key.db user: ${U:-none}"
-          if [ "$CREDS_OK" != "true" ]; then
-            echo "=== easynode-orchestrator.log:"
-            docker exec alpine-box-test sh -c 'cat /var/log/easynode-orchestrator.log 2>/dev/null || echo "(不存在)"'
-            echo "=== easynode.log 尾部:"
-            docker exec alpine-box-test sh -c 'tail -20 /var/log/easynode.log 2>/dev/null'
-            echo "=== 进程:"
-            docker exec alpine-box-test sh -c 'ps aux | grep -v grep | grep -E "node|sh " | head -8'
-            echo "=== 端口:"
-            docker exec alpine-box-test sh -c 'netstat -tln 2>/dev/null | head -12'
-            echo EASYNODE_CREDS_FAIL
-            exit 1
-          fi
-          echo EASYNODE_PANEL_OK
+          echo "panel HTTP $CODE, body bytes: $(wc -c < /tmp/webssh.html)"
+          [ "$CODE" = "200" ] || { echo WEBSSH_PANEL_FAIL; exit 1; }
+          # 版本端点 (静态二进制 baked version)
+          VER=$(curl -s -m 5 http://127.0.0.1:18000/api/version)
+          echo "version: $VER"
+          echo "$VER" | grep -q version || { echo WEBSSH_VERSION_FAIL; exit 1; }
+          # 管理员登录
+          LOGIN=$(curl -s -m 5 -X POST -H 'Content-Type: application/json' \
+            --data '{"Username":"ci-admin","Password":"ci-test-password-2026"}' \
+            http://127.0.0.1:18000/api/login)
+          echo "login: $LOGIN"
+          echo "$LOGIN" | grep -q '"ok":true' || { echo WEBSSH_LOGIN_FAIL; exit 1; }
+          # 预置的 local-box 会话存在 (store.json, 登录后 API 亦可)
+          docker exec alpine-box-test sh -c 'grep -q "local-box" /var/lib/alpine-box/webssh/store.json' \
+            && echo LOCAL_SESSION_OK || { echo LOCAL_SESSION_FAIL; exit 1; }
+          echo WEBSSH_PANEL_OK
 
       - name: 容器日志
         if: always()

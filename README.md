@@ -1,108 +1,99 @@
-# alpine-box
+# alpine-box-lite
 
-Alpine 系统镜像，集成三个运维工具，可直接部署到 [deployzy](https://deployzy.com/) 等容器平台作为远程管理机使用。
+轻量 Alpine 系统镜像：把内存占用高的 Node/EasyNode 换成 [casualty01/web_ssh](https://github.com/casualty01/web_ssh)（Go 单静态二进制，~7MB），保留 sshx / tunc / guan / wstunnel / wssh。适合部署到 [Orkestr](https://orkestr.eu) 等容器平台作为远程管理机。
+
+> 这是 `webssh-lite` 分支。原 `main` 分支仍是 EasyNode 版本；本分支为低内存版本。
 
 ## 集成内容
 
-| 命令 | 来源 | 功能 |
+| 命令 / 服务 | 来源 | 功能 |
 | --- | --- | --- |
 | `sshx` | `scripts/ssh.sh` | SSH 一键配置：装/配 sshd、公钥管理、改密码、重装服务（交互菜单 + 命令行） |
 | `tunc` | `scripts/tunc.sh` | Cloudflare Tunnel 管理（官方 cloudflared 二进制），启动/停止/Token/日志/更新 |
-| `guan` | `scripts/guan.sh` | 服务管理交互菜单（本镜像内通过 OpenRC 管理 sshd / tunc） |
+| `guan` | `scripts/guan.sh` | 服务管理交互菜单（OpenRC 管理 sshd / tunc / webssh / wstunnel） |
+| web_ssh 面板 | `casualty01/web_ssh:1.3.4` | 浏览器 SSH 客户端（会话管理 / SFTP / 分屏 / 隧道），Go 静态二进制 |
+| `wssh` | `wssh-server.py` | 状态页 + SSH over WebSocket/HTTP 桥（备用通道） |
+| `wstunnel` | erebe/wstunnel v11.1.0 | websocket 隧道服务端（仅允许隧道到本机 sshd） |
+
+基础镜像从 `node:22-alpine` 换成 `alpine:3.20`，去掉 Node.js 运行时与 EasyNode 的 NeDB 编排，显著降低内存占用。
 
 镜像内启动流程（`entrypoint.sh`）：
 
-1. 容器内引导 OpenRC（`/run/openrc/softlevel`），sshd 与 tunc 均以标准 OpenRC 服务运行，`guan` 菜单可直接启停/重启；
-2. 按环境变量生成 `sshd_config`、写入公钥、生成主机密钥（优先存放在 `FILE_PATH` 持久化，保持主机指纹稳定）；
-2.1. 经 `/etc/conf.d/sshd` 给 sshd 注入特权分离兼容库（`LD_PRELOAD=/usr/local/lib/chroot-noop.so`），兼容丢弃 `CAP_SYS_CHROOT`/`CAP_SETGID`/`CAP_SETUID` 等 capability 的容器平台（见下方说明）；
-3. `CF_TOKEN` 写入 `/etc/tunc/token` 并启动 Cloudflare Tunnel；
-4. 看门狗每 30s 检查，服务被杀后自动拉起；`SHOW_LOG=true` 时容器 stdout 实时输出 tunc 与系统日志。
+1. 容器内引导 OpenRC，sshd 经 `/etc/conf.d/sshd` 注入 `chroot-noop.so`（兼容丢弃 capability 的平台）后启动；
+2. `webssh-provision` 生成专用 ed25519 密钥、加入 sshd `authorized_keys`，预置一条 `local-box` 会话（连 `127.0.0.1:<SSH_PORT>`）；
+3. web_ssh 面板监听 `$PORT`（默认 3000，平台 HTTP 路由），wssh 桥/状态页在 8080 备用；`CF_TOKEN` 启动时自动拉起 Cloudflare Tunnel；
+4. 看门狗每 30s 检查服务并拉起；60s 内面板未就绪则 wssh 自动接管 `$PORT`；`SHOW_LOG=true` 时 stdout 输出日志。
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SSH_ENABLED` | `true` | 是否启动 SSH 服务（`true/false/1/0/yes/no`） |
+| `SSH_ENABLED` | `true` | 是否启动 SSH 服务 |
 | `SSH_PORT` | `22` | SSH 监听端口，支持逗号分隔多端口（如 `22,2022`） |
 | `SSH_PUBLIC_KEY` | 内置默认公钥 | root 登录公钥，逗号/换行分隔多个 |
 | `CF_TOKEN` | 空 | Cloudflare Tunnel Token，设置后自动启动 tunc |
-| `SHOW_LOG` | `true` | 服务日志是否输出到容器 stdout（供平台日志查看） |
-| `FILE_PATH` | `/var/lib/alpine-box` | 数据目录，SSH 主机密钥持久化在其中 `host-keys/`；EasyNode 数据库在 `easynode/` |
-| `PORT` | `3000` | 平台 HTTP 路由端口（deployzy 平台默认探测 3000） |
-| `EASYNODE_ENABLED` | `true` | 是否启动 EasyNode 面板 |
-| `EASYNODE_HTTP_PORT` | `8082` | EasyNode HTTP 端口（`WEB_PANEL_ON_PORT=easynode` 时自动改绑 `PORT`） |
-| `EASYNODE_ADMIN_USER` | 空 | 设置面板管理员用户名（与 `EASYNODE_ADMIN_PASSWORD` 同时设置时生效） |
-| `EASYNODE_ADMIN_PASSWORD` | 空 | 设置面板管理员密码（幂等，重部署后凭据稳定；不设则用日志里的初始随机密码） |
-| `WEB_PANEL_ON_PORT` | `wssh` | 平台 HTTP 路由指向哪个 web 服务：`wssh`（状态页+SSH桥）或 `easynode`（管理面板） |
+| `SHOW_LOG` | `true` | 服务日志是否输出到容器 stdout |
+| `FILE_PATH` | `/var/lib/alpine-box` | 数据目录：SSH 主机密钥在 `host-keys/`；web_ssh 数据（store.json + 预置密钥）在 `webssh/` |
+| `PORT` | `3000` | 平台 HTTP 路由端口（web_ssh 面板监听） |
+| `ADMIN_USER` | `admin` | web_ssh 面板管理员用户名 |
+| `ADMIN_PASSWORD` | `admin` | web_ssh 面板密码（生产务必设置；仅首次生效，之后以面板内修改为准） |
 | `WSTUNNEL_ENABLED` | `true` | 是否启动 wstunnel 服务端 |
-| `WSTUNNEL_PORT` | `8090` | wstunnel 服务端 WebSocket 监听端口 |
-| `WSTUNNEL_RESTRICT_TO` | `127.0.0.1:2022` | 限制隧道目标（默认仅允许 SSH 到本机，防止被当公网代理滥用） |
-| `TUNNEL_TRANSPORT_PROTOCOL` | 空 | 透传给 cloudflared（如 `http2`，经 OpenRC conf.d 注入） |
+| `WSTUNNEL_PORT` | `8090` | wstunnel WebSocket 监听端口 |
+| `WSTUNNEL_RESTRICT_TO` | `127.0.0.1:2022` | 限制隧道目标（默认仅允许 SSH 到本机） |
+| `TUNNEL_TRANSPORT_PROTOCOL` | 空 | 透传给 cloudflared（如 `http2`） |
 | `TUNNEL_EDGE_IP_VERSION` | 空 | 透传给 cloudflared（如 `4`/`6`） |
 
-## EasyNode 管理面板 (webSSH / SFTP)
+## web_ssh 管理面板
 
-集成 [chaos-zhu/easynode](https://github.com/chaos-zhu/easynode) 官方应用（`/opt/easynode`，OpenRC 服务 `easynode`，guan 可直接管理）：
+- 访问：平台路由 `https://<域名>`（容器 `$PORT`，默认 3000）
+- 登录：`ADMIN_USER` / `ADMIN_PASSWORD`
+- **预置本机会话 `local-box`**：指向容器自身 sshd（`127.0.0.1:<SSH_PORT>`，用户 root），使用启动时生成的专用 ed25519 私钥，登录后即可一键连进本机 shell。密钥与会话在 `FILE_PATH/webssh/`，容器重建不丢失。
+- 会话/分组/隧道/管理员凭据持久化在 `FILE_PATH/webssh/store.json`（原子写）。面板内修改的凭据优先于环境变量。
+- WebSocket 终端走同源 `/ws/ssh`，经平台 HTTPS 反代时请确保转发 Upgrade 头（Orkestr 平台默认支持）。
 
-- 访问：`http://<host>:8082`（或 `WEB_PANEL_ON_PORT=easynode` 时经平台路由 `https://<域名>` 访问）
-- 管理员账号：设置 `EASYNODE_ADMIN_USER` + `EASYNODE_ADMIN_PASSWORD` 环境变量即可（推荐，重部署后凭据稳定）；不设置则每次首次启动随机生成，写在 `/var/log/easynode.log`（状态页 `easynode.log` 段落可见）
-- 数据（账号/凭据/脚本库）持久化在 `FILE_PATH/easynode/`，容器重建不丢失
-- 未集成 guacd（RDP 远程桌面不可用）；SSH/SFTP/脚本库/监控等核心功能不受影响
-- 面板自动更新（watchtower）未集成，跟随镜像重建更新
+> 注意：web_ssh 是浏览器 SSH **客户端**，连接的是你保存的 SSH 目标主机；`local-box` 是预置来管理本容器的。要连外部主机，在面板里添加会话即可（目标必须能从容器内网络到达）。
 
 ## 状态页与 SSH over WebSocket 桥
 
-容器内 3000 端口运行 `wssh-server`（纯 Python 标准库）：
+容器内 8080 端口运行 `wssh-server`（纯 Python 标准库）：
 
-- `http://<host>:3000/` — 状态页（服务状态 + 出站探测 + 日志尾部），平台 HTTP 路由远程检查用
-- `ws(s)://<host>:3000/ssh` — WebSocket → 本机 sshd 的双向桥，可穿透 HTTPS 反代/CDN 访问容器 SSH
+- `http://<host>:8080/` — 状态页（服务状态 + 出站探测 + 日志尾部），远程检查用
+- `ws(s)://<host>:8080/ssh` — WebSocket → 本机 sshd 的双向桥
+- `/wssh-poll/*` — HTTP 长轮询传输（反代拦截 WS 时自动降级）
 
 ```
-alpine-box status @ 2026-11-14T08:00:00Z
+alpine-box status @ 2026-11-17T08:00:00Z
 sshd : RUNNING
 tunc : RUNNING
-tunnel-token: SET
+webssh : RUNNING
 ...
 ```
 
-### 通过平台路由连接 SSH（无需隧道/端口开放）
-
-从仓库 `tools/` 下载 `wssh.py`（纯标准库，客户端只需有 python3），然后连接 **status 服务域名**（wssh 桥所在，注意不是主域名 —— 主域名现在是 EasyNode 面板）：
+从仓库 `tools/` 下载 `wssh.py`（纯标准库），作为 ProxyCommand 使用：
 
 ```bash
-# 方式一：ProxyCommand 一次性直连（推荐）
-ssh -o ProxyCommand="python3 wssh.py pipe --host alpine-box-status.deployzy.app --tls" \
-    -o StrictHostKeyChecking=accept-new root@alpine-box-status
-
-# 方式二：本地端口转发
-python3 wssh.py tunnel --host alpine-box-status.deployzy.app --tls --local 2222
-ssh -p 2222 root@127.0.0.1
+ssh -o ProxyCommand="python3 wssh.py pipe --host <host> --port 8080" \
+    -o StrictHostKeyChecking=no root@127.0.0.1 'echo OK'
+# 强制轮询传输：加 --transport poll
 ```
 
-传输自动降级：优先尝试 WebSocket（延迟低）；平台反代/CDN 拦截 WS 升级时（如 deployzy 边缘返回 502），自动切换为 HTTP 长轮询（纯 request/response，可穿透任何 HTTP 反代，延迟约一个 RTT）。也可用 `--transport poll` 强制指定。
-
-在正常网络（自有 VPS）上，仍然优先走 Cloudflare Tunnel：隧道 ingress 指向 `ssh://localhost:<SSH_PORT>`，用 `cloudflared access tcp` 直连即可。WS/轮询桥是隧道不可用（平台封锁 7844 等）时的通用兜底 —— 认证由 sshd 公钥完成，安全性等同暴露 22 端口。
-
-> 注：deployzy 自带的 `deployzy tcp`（暴露 TCP 端口到 `deployzy.com:<10000-60000>`）需要 Pro 套餐，免费版会报 "tcp tunnels require a paid plan"。
+正常网络仍优先走 Cloudflare Tunnel（tunc）：隧道 ingress 指向 `ssh://localhost:<SSH_PORT>`，用 `cloudflared access tcp` 直连。
 
 ## wstunnel 隧道（供 wstunnel.exe 等客户端）
 
-镜像内置 [erebe/wstunnel](https://github.com/erebe/wstunnel) **v11.1.0 服务端**（8090 端口，`--restrict-to 127.0.0.1:2022` 仅允许隧道到本机 sshd）。Windows 客户端示例：
+镜像内置 erebe/wstunnel **v11.1.0 服务端**（8090 端口，`--restrict-to 127.0.0.1:2022`）：
 
 ```bash
-wstunnel.exe client wss://alpine-box-wstunnel.deployzy.app -L tcp://127.0.0.1:11080:127.0.0.1:2022
+wstunnel.exe client wss://<host>:443 -L tcp://127.0.0.1:11080:127.0.0.1:2022
 ssh -p 11080 root@127.0.0.1
 ```
 
-- 客户端与服务端必须同为 **v11.x**（客户端 `wstunnel.exe --version` 确认）
-- 必须用 `wss://`（HTTPS 443），`ws://` 明文 80 端口会被 Cloudflare 301 拒掉
-- deployzy 平台边缘对 WebSocket 升级拦截不稳定，wstunnel 客户端自带重试，多数情况可建立；自有 VPS 部署则无此限制
+- 客户端必须同为 v11.x；wss:// 经 HTTPS 反代，ws:// 明文会被 CDN 拒
 - 服务端限制隧道目标为 `127.0.0.1:2022`，可改 `WSTUNNEL_RESTRICT_TO`（不建议放开）
 
-## 部署到 deployzy
+## 部署到 Orkestr
 
-1. 项目类型选 **预构建镜像**：`ghcr.io/nxcoom/alpine-box:latest`（首次发布后需在 GitHub Packages 设置中把该镜像设为 public）。
-2. 配置环境变量：
+项目从 GitHub 仓库构建（`repo_url=https://github.com/nxcoom/alpine-box`，`repo_branch=webssh-lite`）。环境变量示例：
 
 ```
 SSH_ENABLED=true
@@ -111,55 +102,27 @@ SSH_PUBLIC_KEY=ssh-ed25519 AAAA... （你的公钥）
 CF_TOKEN=eyJ... （Cloudflare Tunnel Token）
 SHOW_LOG=true
 FILE_PATH=/var/lib/alpine-box
+ADMIN_USER=admin
+ADMIN_PASSWORD=<强密码>
 ```
 
-3. 部署后平台日志可见：`sshd 已启动` / `tunc (Cloudflare Tunnel) 已启动`。
-
-本地直接运行：
-
-```bash
-docker run -d --name alpine-box \
-  -p 2022:2022 \
-  -e SSH_PORT=2022 \
-  -e SSH_PUBLIC_KEY="ssh-ed25519 AAAA..." \
-  -e CF_TOKEN="eyJ..." \
-  ghcr.io/nxcoom/alpine-box:latest
-```
-
-进入容器后可直接运行 `sshx` / `tunc` / `guan` 交互菜单：
-
-```bash
-ssh -p 2022 root@<host>
-guan        # 服务管理菜单 (OpenRC)
-tunc        # Tunnel 管理菜单
-sshx        # SSH 配置菜单
-```
+部署后平台日志可见：`sshd 已启动` / `web_ssh 面板已启动` / `tunc (Cloudflare Tunnel) 已启动`。
 
 ## 构建
 
-推送 `main` 分支或打 `v*` 标签后，GitHub Actions 自动构建 `linux/amd64` + `linux/arm64` 双架构镜像并发布到 GHCR（先跑冒烟测试：真实 SSH 登录验证 + 三个工具可用性检查）。
-
-冒烟测试用 `--cap-drop=SYS_CHROOT --cap-drop=SETGID --cap-drop=SETUID` 启动容器，复现 Orkestr / rootless Podman 等平台丢弃这些 capability 的场景，确保 SSH 登录在受限平台上仍然可用（兼容库生效）。
-
-手动触发：Actions → build → Run workflow。
+推送 `webssh-lite` 分支后，GitHub Actions 自动构建 `linux/amd64` + `linux/arm64` 双架构镜像并发布到 GHCR；先跑冒烟测试：真实 SSH 登录（三个 capability 全丢） + web_ssh 面板登录 + 预置会话 + 三个工具 + wstunnel。
 
 ## 故障排查
 
-**sshd 显示 RUNNING 但任何密钥/密码都登录不了，日志报 `fatal: chroot("/var/empty"): Operation not permitted [preauth]` 或 `fatal: setgroups: Operation not permitted [preauth]`**
+**sshd RUNNING 但登录报 `fatal: chroot("/var/empty"): Operation not permitted [preauth]` / `fatal: setgroups: ...`** — 平台丢弃 `CAP_SYS_CHROOT/SETGID/SETUID`，镜像已内置 `chroot-noop.so` 经 `/etc/conf.d/sshd` 注入；手动启动 sshd 时需自行 `LD_PRELOAD=/usr/local/lib/chroot-noop.so`。
 
-这是容器平台丢弃 `CAP_SYS_CHROOT` / `CAP_SETGID` / `CAP_SETUID` 导致 OpenSSH 9.8+ 的 preauth 特权分离（chroot + 降权）失败。本镜像已内置兼容库 `chroot-noop.so` 并经 `/etc/conf.d/sshd` 自动为 sshd 注入（capability 完整时该库不干预）。若仍出现，检查：
+**认证成功但 `fork: Resource temporarily unavailable`** — 容器 PID 打满；镜像用 `tini -g` 作 PID1 回收僵尸，并给 Go 服务（cloudflared/wstunnel/webssh）注入 `GOMAXPROCS=2`。可用平台 stats 的 `pids` 观察；仍打满可关 `WSTUNNEL_ENABLED=false`。
 
-- 容器内 `/usr/local/lib/chroot-noop.so` 存在、`/etc/conf.d/sshd` 含 `LD_PRELOAD=...chroot-noop.so`；
-- 若手动以非 OpenRC 方式启动 sshd（如 `sshd -D`），需自行设置 `LD_PRELOAD=/usr/local/lib/chroot-noop.so`（OpenRC 服务已自动处理）。
-
-**SSH 认证成功（`Accepted publickey`）但随后报 `fork: Resource temporarily unavailable` / shell 起不来**
-
-这是容器进程数（PID）被打满（平台硬限，Orkestr 为 256），不是 SSH 配置问题。镜像用 `tini`（`-g`）作 PID 1 回收僵尸进程，并给两个 Go 服务（cloudflared/tunc、wstunnel）注入 `GOMAXPROCS=2` 限制线程数，避免渐进式耗尽 PID。可用平台 stats 的 `pids` 字段观察。若仍打满，考虑关闭非必需的常驻服务（如 `WSTUNNEL_ENABLED=false`）。
+**面板 60s 未就绪** — 平台路由会自动交给 wssh 状态页/桥接管 `$PORT`；诊断见 `/var/log/webssh-fallback.log` 与 `/var/log/webssh.log`。
 
 ## 脚本来源
-
-三个脚本为原版整合（与线上分发版本一致）：
 
 - `https://sb.vir.kdns.fr/sh/ssh.sh` （v2.1）
 - `https://tun.uvn.kdns.fr/tunc.sh`
 - `https://tun.uvn.kdns.fr/guan.sh` （v1.2.1）
+- web_ssh: `https://github.com/casualty01/web_ssh` （固定 1.3.4）

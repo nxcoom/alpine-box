@@ -2,14 +2,14 @@
 # ============================================================
 #  alpine-box 容器入口
 #  集成: sshx (SSH 服务) / tunc (Cloudflare Tunnel) / guan (服务管理)
+#        + web_ssh (Go webSSH 面板) + wssh (SSH over HTTP 桥 + 状态页)
 #
-#  支持的环境变量 (deployzy 平台):
-#    SSH_ENABLED     是否启用 SSH (默认 true)
-#    SSH_PORT        SSH 监听端口 (默认 22, 支持逗号分隔多端口)
-#    SSH_PUBLIC_KEY  root 公钥 (逗号/换行分隔, 未设置时使用内置默认公钥)
-#    CF_TOKEN        Cloudflare Tunnel Token (设置后自动启动 tunc)
-#    SHOW_LOG        是否将服务日志输出到容器 stdout (默认 true)
-#    FILE_PATH       数据目录 (持久化 SSH 主机密钥, 默认 /var/lib/alpine-box)
+#  支持的环境变量:
+#    SSH_ENABLED / SSH_PORT / SSH_PUBLIC_KEY / CF_TOKEN / SHOW_LOG / FILE_PATH  (同前)
+#    PORT            平台 HTTP 路由端口 (默认 3000, web_ssh 面板占用; wssh 桥退到 8080)
+#    ADMIN_USER       web_ssh 面板管理员 (默认 admin)
+#    ADMIN_PASSWORD   web_ssh 面板密码 (默认 admin, 生产务必设置)
+#    WSTUNNEL_*       wstunnel 服务端 (默认开启)
 # ============================================================
 set -u
 
@@ -21,11 +21,11 @@ SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-$DEFAULT_SSH_PUBLIC_KEY}"
 SHOW_LOG="${SHOW_LOG:-true}"
 CF_TOKEN="${CF_TOKEN:-}"
 FILE_PATH="${FILE_PATH:-/var/lib/alpine-box}"
-PORT="${PORT:-3000}"   # 平台 HTTP 路由端口 (deployzy 默认探测 3000)
-EASYNODE_ENABLED="${EASYNODE_ENABLED:-true}"
-EASYNODE_HTTP_PORT="${EASYNODE_HTTP_PORT:-8082}"
-# 平台 HTTP 路由指向哪个 web 服务: wssh(默认, 状态页+SSH桥) 或 easynode(管理面板)
-WEB_PANEL_ON_PORT="${WEB_PANEL_ON_PORT:-wssh}"
+PORT="${PORT:-3000}"   # 平台 HTTP 路由端口 (web_ssh 面板监听)
+ADMIN_USER="${ADMIN_USER:-admin}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
+# 平台 HTTP 路由: web_ssh 面板占 $PORT; wssh 桥/状态页在备用端口 8080
+WSSH_BIND_PORT=8080
 WSTUNNEL_ENABLED="${WSTUNNEL_ENABLED:-true}"
 WSTUNNEL_PORT="${WSTUNNEL_PORT:-8090}"
 WSTUNNEL_RESTRICT_TO="${WSTUNNEL_RESTRICT_TO:-127.0.0.1:2022}"
@@ -43,21 +43,12 @@ to_bool() {
 }
 SSH_ENABLED=$(to_bool "$SSH_ENABLED")
 SHOW_LOG=$(to_bool "$SHOW_LOG")
-EASYNODE_ENABLED=$(to_bool "$EASYNODE_ENABLED")
 WSTUNNEL_ENABLED=$(to_bool "$WSTUNNEL_ENABLED")
 echo "$SSH_ENABLED" > /run/.alpine-box-ssh-enabled
-echo "$EASYNODE_ENABLED" > /run/.alpine-box-easynode-enabled
 echo "$WSTUNNEL_ENABLED" > /run/.alpine-box-wstunnel-enabled
+echo true > /run/.alpine-box-webssh-enabled
 
-# 平台 HTTP 路由端口归属: wssh(默认) 或 easynode
-WSSH_BIND_PORT="$PORT"
-if [ "$WEB_PANEL_ON_PORT" = "easynode" ]; then
-  EASYNODE_HTTP_PORT="$PORT"
-  WSSH_BIND_PORT=8080
-  log "平台路由端口 $PORT → EasyNode 面板 (wssh 桥/状态页改到 8080)"
-fi
-# init.d start_pre 从环境读取 (openrc-run 子进程只继承 export 的变量)
-export EASYNODE_HTTP_PORT
+# 平台 HTTP 路由端口 $PORT → web_ssh 面板; wssh 桥/状态页备用端口见 WSSH_BIND_PORT
 
 # cloudflared 边缘连接参数透传 (例如出口仅 IPv6 可用时: TUNNEL_EDGE_IP_VERSION=6)
 [ -n "${TUNNEL_EDGE_IP_VERSION:-}" ] && export TUNNEL_EDGE_IP_VERSION
@@ -189,30 +180,39 @@ else
   log "未设置 CF_TOKEN, 不启动 Cloudflare Tunnel (之后可用 tunc token <TOKEN> && tunc start)"
 fi
 
-# ---------- 2.5 EasyNode 管理面板 (webSSH/SFTP) ----------
-if [ "$EASYNODE_ENABLED" = "true" ] && [ -f /opt/easynode/index.js ]; then
-  # 数据库持久化: /opt/easynode/app/db → FILE_PATH/easynode (凭据/配置跨重建保留)
-  if mkdir -p "$FILE_PATH/easynode" 2>/dev/null && [ -w "$FILE_PATH/easynode" ]; then
-    rm -rf /opt/easynode/app/db
-    ln -s "$FILE_PATH/easynode" /opt/easynode/app/db
-    log "EasyNode 数据目录: $FILE_PATH/easynode"
+# ---------- 2.5 web_ssh 面板 (casualty01/web_ssh, Go 静态二进制) ----------
+# FILE_PATH 下持久化 webssh 数据 (store.json: 会话/隧道/管理员) 与预置密钥。
+WEBSSH_DATA_DIR="$FILE_PATH/webssh"
+mkdir -p "$WEBSSH_DATA_DIR" 2>/dev/null || WEBSSH_DATA_DIR=/var/lib/alpine-box/webssh
+chmod 700 "$WEBSSH_DATA_DIR" 2>/dev/null || true
+
+# 首次启动预置: 生成专用密钥 -> 加入 sshd authorized_keys -> 写 local-box 会话。
+# 必须在启动 webssh 之前完成 (web_ssh 启动时把 store.json 读入内存)。
+FIRST_SSH_PORT_EARLY=$(printf '%s' "$PORTS" | head -n 1)
+python3 /usr/local/bin/webssh-provision "$WEBSSH_DATA_DIR" "$FIRST_SSH_PORT_EARLY" /root/.ssh/authorized_keys \
+  && log "web_ssh 已预置本机会话 local-box (127.0.0.1:$FIRST_SSH_PORT_EARLY)" \
+  || warn "webssh-provision 失败 (详见容器日志), 面板仍会启动但无预置会话"
+
+if [ -x /usr/local/bin/webssh ] && [ -f /usr/local/share/webssh.openrc-init ]; then
+  cp /usr/local/share/webssh.openrc-init /etc/init.d/webssh
+  chmod 755 /etc/init.d/webssh
+  rc-update add webssh default 2>/dev/null || true
+  # OpenRC 不透传调用方环境变量, 配置经 conf.d 注入 (openrc-run 自动 source)
+  {
+    echo "export DATA_DIR='$WEBSSH_DATA_DIR'"
+    echo "export WEB_DIR='/opt/webssh/web'"
+    echo "export LISTEN_ADDR=':$PORT'"
+    echo "export ADMIN_USER='$ADMIN_USER'"
+    echo "export ADMIN_PASSWORD='$ADMIN_PASSWORD'"
+    echo 'export GOMAXPROCS=2'   # 限制 Go 线程, 避免低 pids 上限被撑爆
+  } > /etc/conf.d/webssh
+  if rc-service webssh start; then
+    log "web_ssh 面板已启动: http://0.0.0.0:$PORT (admin=$ADMIN_USER)"
   else
-    warn "FILE_PATH 不可写, EasyNode 数据不持久化 (容器重建后面板账号会重置)"
-  fi
-  if [ -f /usr/local/share/easynode.openrc-init ]; then
-    cp /usr/local/share/easynode.openrc-init /etc/init.d/easynode
-    chmod 755 /etc/init.d/easynode
-    rc-update add easynode default 2>/dev/null || true
-  fi
-  # OpenRC 不透传调用方环境变量, 端口经 conf.d 注入 (openrc-run 自动 source, init.d start_pre 引用)
-  echo "export EASYNODE_HTTP_PORT='$EASYNODE_HTTP_PORT'" > /etc/conf.d/easynode
-  if rc-service easynode start; then
-    log "EasyNode 已启动: http://0.0.0.0:$EASYNODE_HTTP_PORT"
-  else
-    err "EasyNode 启动失败, 可通过 /var/log/easynode.log 查看"
+    err "web_ssh 启动失败, 可通过 /var/log/webssh.log 查看"
   fi
 else
-  log "EASYNODE_ENABLED=false, 跳过 EasyNode"
+  warn "webssh 二进制/OpenRC 文件缺失, 跳过 web_ssh 面板"
 fi
 
 # ---------- 2.6 wstunnel 服务端 (websocket 隧道, 供 wstunnel.exe 等客户端接入) ----------
@@ -247,7 +247,7 @@ write_status() {
     echo "sshd : $(pgrep -f 'sshd.*[l]istener' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo "tunc : $(pgrep -f 'local/lib/tunc/tunc' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo "tunnel-token: $([ -s /etc/tunc/token ] && echo SET || echo NONE)"
-    echo "easynode: $(pgrep -f 'index[.]js' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
+    echo "webssh : $(pgrep -f '/usr/local/bin/webssh' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo "wstunnel: $(pgrep -f 'wstunnel server' >/dev/null 2>&1 && echo RUNNING || echo STOPPED)"
     echo
     echo "== 网络出站探测 =="
@@ -264,14 +264,8 @@ write_status() {
     echo "== wssh.log (tail 15) =="
     tail -n 15 /var/log/wssh.log 2>/dev/null
     echo
-    echo "== easynode.log (tail 15, 含初始账号密码) =="
-    tail -n 15 /var/log/easynode.log 2>/dev/null
-    echo
-    echo "== easynode-fallback.log =="
-    tail -n 30 /var/log/easynode-fallback.log 2>/dev/null
-    echo
-    echo "== easynode-orchestrator.log =="
-    tail -n 15 /var/log/easynode-orchestrator.log 2>/dev/null
+    echo "== webssh.log (tail 15) =="
+    tail -n 15 /var/log/webssh.log 2>/dev/null
     echo
     echo "== wstunnel.log (tail 10) =="
     tail -n 10 /var/log/wstunnel.log 2>/dev/null
@@ -295,107 +289,34 @@ start_wssh() {
   python3 /usr/local/bin/wssh-server "${1:-$WSSH_BIND_PORT}" "$STATUS_DIR" 127.0.0.1 "$FIRST_SSH_PORT" >/dev/null 2>&1 &
 }
 if command -v python3 >/dev/null 2>&1 && [ -x /usr/local/bin/wssh-server ]; then
-  # 平台路由被 EasyNode 占用时, wssh 先绑定备用端口, 由自检逻辑决定最终归属
-  if [ "$WEB_PANEL_ON_PORT" = "easynode" ]; then
-    start_wssh "$WSSH_BIND_PORT"
-    log "wssh 桥/状态页(备用)已启动: 端口 $WSSH_BIND_PORT"
-  else
-    start_wssh
-    log "状态页 + SSH over WebSocket 桥已启动: 端口 $WSSH_BIND_PORT (WS 路径 /ssh → 本机 sshd:$FIRST_SSH_PORT)"
-  fi
+  start_wssh "$WSSH_BIND_PORT"
+  log "wssh 桥/状态页已启动: 端口 $WSSH_BIND_PORT (WS 路径 /ssh → 本机 sshd:$FIRST_SSH_PORT); 若面板 60s 未就绪会接管端口 $PORT"
 else
   warn "python3/wssh-server 不可用, 状态页与 WS 桥不可用"
 fi
 
-# ---------- 3.7 EasyNode 编排: 凭据设置 (停服窗口写 NeDB) + 平台路由自检 ----------
-# NeDB 不能与运行中的应用并发写 (上游 reset-password.js 同样要求先停服)。
-# 时机: 必须等应用 HTTP 完全就绪 (初始化全部结束) 再停服改写, 否则应用初始化
-# 收尾时会用随机凭据覆盖外部修改 (db.js: 无账号记录则生成随机 user/pwd 并 $set)。
-if [ "$EASYNODE_ENABLED" = "true" ]; then
-  (
-    wait_http() { # $1=port
-      n=0
-      while [ $n -lt 45 ]; do
-        curl -s -o /dev/null -m 3 "http://127.0.0.1:$1/" && return 0
-        sleep 2; n=$((n+1))
-      done
-      return 1
-    }
-    # 1. 凭据收敛循环: NeDB 是 append-replay 格式, 应用初始化分多段写入
-    #    (先 insert 随机用户 → 生成 RSA 密钥后再 $set 覆盖), 我们的写入可能被
-    #    应用后续写入盖掉 → 每轮: 等应用就绪 → 校验 key.db 最终状态 → 不对就
-    #    有界强杀 + 停服补写 + 重启 → 重新校验 (补写在应用写入之后, 重放最后者胜)
-    ORCH_LOG=/var/log/easynode-orchestrator.log
-    orch() { echo "$(date -u '+%FT%TZ') $*" >> "$ORCH_LOG"; }
-    check_user() {
-      ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs --check 2>>"$ORCH_LOG" ) | grep '^user=' | cut -d= -f2
-    }
-    stop_easynode_bounded() {
-      # node 收到 SIGTERM 可能长时间不退出, rc-service stop 会随之阻塞 → 直接有界强杀
-      pkill -TERM -f 'index[.]js' 2>/dev/null || true
-      n=0
-      while [ $n -lt 8 ] && pgrep -f 'index[.]js' >/dev/null 2>&1; do sleep 1; n=$((n+1)); done
-      pgrep -f 'index[.]js' >/dev/null 2>&1 && pkill -KILL -f 'index[.]js' 2>/dev/null || true
-      sleep 1
-      timeout 15 rc-service easynode stop >/dev/null 2>&1 || true
-      # 进程已死但 openrc 状态残留时清理, 避免 start 被"已启动"挡住
-      if ! pgrep -f 'index[.]js' >/dev/null 2>&1 && [ -e /run/openrc/started/easynode ]; then
-        rm -f /run/openrc/started/easynode
-      fi
-      sleep 1
-    }
-    orch "=== 编排开始"
-    if [ -n "${EASYNODE_ADMIN_USER:-}" ] && [ -n "${EASYNODE_ADMIN_PASSWORD:-}" ]; then
-      touch /run/.alpine-box-easynode-paused   # 看门狗在编排期间不干预
-      try=0; done_ok=""
-      while [ $try -lt 4 ]; do
-        if ! wait_http "$EASYNODE_HTTP_PORT"; then
-          orch "round $try: wait_http FAIL"; sleep 2; try=$((try+1)); continue
-        fi
-        U=$(check_user)
-        orch "round $try: key.db user=$U"
-        [ "$U" = "$EASYNODE_ADMIN_USER" ] && { done_ok=true; break; }
-        stop_easynode_bounded
-        ( cd /opt/easynode && node /opt/easynode/scripts/alpine-set-creds.mjs >>"$ORCH_LOG" 2>&1 ) \
-          || orch "patch 脚本报错 (尝试 $try)"
-        timeout 25 rc-service easynode start >/dev/null 2>&1 || true
-        try=$((try+1))
-      done
-      rm -f /run/.alpine-box-easynode-paused
-      if [ "$done_ok" = "true" ]; then
-        log "EasyNode 管理员账号已按环境变量设置: $EASYNODE_ADMIN_USER"
-      else
-        orch "凭据收敛失败"
-        warn "EasyNode 凭据收敛失败 (详见 $ORCH_LOG), 随机密码见 /var/log/easynode.log"
-      fi
-    else
-      orch "未设置 EASYNODE_ADMIN_USER/PASSWORD, 凭据沿用应用随机生成"
-    fi
-    # 3. 平台路由自检: easynode 模式下面板必须应答, 未就绪则回退 wssh
-    #    (等待期间 wssh 绝不能占用 $PORT, 否则 node 就绪后会 EADDRINUSE 崩溃循环)
-    if [ "$WEB_PANEL_ON_PORT" = "easynode" ]; then
-      n=0; up=""
-      while [ $n -lt 45 ]; do
-        if curl -s -o /dev/null -m 3 "http://127.0.0.1:$PORT/"; then up=true; break; fi
-        sleep 2; n=$((n+1))
-      done
-      if [ "$up" = "true" ]; then
-        printf '%b\n' "${GREEN}[alpine-box]${NC} easynode 自检通过, 面板在端口 $PORT"
-      else
-        {
-          echo "== easynode 自检失败 @ $(date -u '+%FT%TZ') (端口 $PORT)"
-          echo "-- netstat:"; netstat -tln 2>/dev/null | head -20
-          echo "-- node 进程:"; pgrep -af node | head -5
-          echo "-- easynode.log 尾部:"; tail -30 /var/log/easynode.log 2>/dev/null
-        } >> /var/log/easynode-fallback.log 2>&1
-        echo false > /run/.alpine-box-easynode-enabled
-        stop_easynode_bounded
-        start_wssh "$PORT"
-        printf '%b\n' "${YELLOW}[alpine-box]${NC} easynode 90s 未就绪, 状态页/SSH 桥已接管端口 $PORT (诊断: /var/log/easynode-fallback.log)"
-      fi
-    fi
-  ) &
-fi
+# ---------- 3.7 平台路由自检: webssh 未就绪则让 wssh 接管 $PORT ----------
+(
+  n=0; up=""
+  while [ $n -lt 30 ]; do  # 最多 ~60s
+    if curl -s -o /dev/null -m 3 "http://127.0.0.1:$PORT/"; then up=true; break; fi
+    sleep 2; n=$((n+1))
+  done
+  if [ "$up" = "true" ]; then
+    printf '%b\n' "${GREEN}[alpine-box]${NC} web_ssh 自检通过, 面板在端口 $PORT"
+  else
+    {
+      echo "== web_ssh 自检失败 @ $(date -u '+%FT%TZ') (端口 $PORT)"
+      echo "-- netstat:"; netstat -tln 2>/dev/null | head -20
+      echo "-- webssh 进程:"; pgrep -af webssh | head -5
+      echo "-- webssh.log 尾部:"; tail -30 /var/log/webssh.log 2>/dev/null
+    } >> /var/log/webssh-fallback.log 2>&1
+    echo false > /run/.alpine-box-webssh-enabled
+    rc-service webssh stop >/dev/null 2>&1 || true
+    start_wssh "$PORT"
+    printf '%b\n' "${YELLOW}[alpine-box]${NC} web_ssh 60s 未就绪, 状态页/SSH 桥已接管端口 $PORT (诊断: /var/log/webssh-fallback.log)"
+  fi
+) &
 
 # ---------- 4. 看门狗: 每 30s 检查, 服务被杀后自动拉起 ----------
 (
@@ -423,13 +344,12 @@ fi
       rc-service wstunnel start >/dev/null 2>&1 \
         && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 wstunnel" || true
     fi
-    if [ "$(cat /run/.alpine-box-easynode-enabled 2>/dev/null)" = "true" ] \
-       && [ ! -f /run/.alpine-box-easynode-paused ] \
-       && [ -f /etc/init.d/easynode ] \
-       && ! pgrep -f 'index[.]js' >/dev/null 2>&1; then
-      rc-service easynode stop >/dev/null 2>&1
-      rc-service easynode start >/dev/null 2>&1 \
-        && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 easynode" || true
+    if [ "$(cat /run/.alpine-box-webssh-enabled 2>/dev/null)" != "false" ] \
+       && [ -f /etc/init.d/webssh ] \
+       && ! pgrep -f '/usr/local/bin/webssh' >/dev/null 2>&1; then
+      rc-service webssh stop >/dev/null 2>&1
+      rc-service webssh start >/dev/null 2>&1 \
+        && printf '%b\n' "${YELLOW}[alpine-box]${NC} 看门狗: 已重新拉起 web_ssh" || true
     fi
   done
 ) &
