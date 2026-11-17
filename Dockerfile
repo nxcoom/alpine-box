@@ -5,9 +5,11 @@
 #  平台环境变量: SSH_ENABLED / SSH_PORT / SSH_PUBLIC_KEY / CF_TOKEN / SHOW_LOG
 #                FILE_PATH / ADMIN_USER / ADMIN_PASSWORD
 # ============================================================
-# 轻量分支: 用 casualty01/web_ssh (Go 静态二进制, ~7MB) 替代 Node/EasyNode,
-# 去掉 node:22 运行时以降低内存占用。
-FROM alpine:3.20
+# 轻量分支: 用 casualty01/web_ssh (Go 静态二进制, ~7MB) 替代 Node/EasyNode。
+# 内存下降来自"不再运行 EasyNode 的 node 进程", 而非删除 node 二进制 (后者在磁盘上
+# 不占运行时内存)。保留 node:22-alpine 基础镜像可沿用 main 分支已验证的 OpenRC 行为,
+# 避免换 alpine 版本导致 rc-service/supervise-daemon 版本差异。
+FROM node:22-alpine
 
 LABEL org.opencontainers.image.title="alpine-box-lite" \
       org.opencontainers.image.description="Alpine 系统镜像: sshx + tunc + guan + web_ssh + wssh (轻量版)" \
@@ -72,7 +74,6 @@ RUN chmod +x /entrypoint.sh /usr/local/bin/healthcheck /usr/local/bin/wssh-serve
  && rm -rf /tmp/troot \
  && chmod 755 /usr/local/lib/tunc/tunc /usr/local/bin/tunc \
  && chmod 755 /usr/local/share/webssh.openrc-init /usr/local/share/wstunnel.openrc-init \
- && webssh --help >/dev/null 2>&1 || true \
  && tunc version
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s CMD /usr/local/bin/healthcheck
